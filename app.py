@@ -1,8 +1,8 @@
 # ============================================================
-# SOCIAL FEED DASHBOARD - POST NOW & SCHEDULE (COMPLETE)
+# SOCIAL FEED DASHBOARD - COMPLETE WITH PERSISTENT REMOVAL
 # ============================================================
 
-from flask import Flask, jsonify, request, render_template_string
+from flask import Flask, jsonify, request, render_template_string, send_file
 from flask_cors import CORS
 from fetcher import fetch_facebook_posts
 from datetime import datetime, timedelta
@@ -13,6 +13,10 @@ import requests
 from io import BytesIO
 import pytz
 from zernio import Zernio
+import hashlib
+import io
+import textwrap
+from PIL import Image, ImageDraw, ImageFont
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -34,41 +38,11 @@ from config import ZERNIO_API_KEY, FACEBOOK_PROFILE_ID
 TIMEZONE = "Africa/Nairobi"  # GMT+3
 MIN_SCHEDULE_MINUTES = 5     # Minimum minutes ahead for scheduling
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # ============================================================
-# UPSTASH REDIS REST API (No package required!)
+# UPSTASH REDIS REST API
 # ============================================================
-
-import requests
-import json
 
 class UpstashRedis:
-    """Upstash Redis REST API client - no package needed"""
-    
     def __init__(self, url, token):
         self.url = url.rstrip('/')
         self.token = token
@@ -78,12 +52,9 @@ class UpstashRedis:
         }
     
     def _request(self, command, *args):
-        """Execute a Redis command via REST API"""
         try:
-            # Build URL with command and args
             url = f"{self.url}/{command}"
             for arg in args:
-                # URL encode the argument if needed
                 import urllib.parse
                 url += f"/{urllib.parse.quote(str(arg), safe='')}"
             
@@ -100,7 +71,6 @@ class UpstashRedis:
             return None
     
     def set(self, key, value, ex=None):
-        """Set a key with optional TTL (seconds)"""
         try:
             if ex:
                 return self._request('SET', key, value, 'EX', ex)
@@ -110,7 +80,6 @@ class UpstashRedis:
             return None
     
     def get(self, key):
-        """Get a key value"""
         try:
             return self._request('GET', key)
         except Exception as e:
@@ -118,7 +87,6 @@ class UpstashRedis:
             return None
     
     def delete(self, key):
-        """Delete a key"""
         try:
             return self._request('DEL', key)
         except Exception as e:
@@ -126,7 +94,6 @@ class UpstashRedis:
             return None
     
     def exists(self, key):
-        """Check if key exists"""
         try:
             return self._request('EXISTS', key)
         except Exception as e:
@@ -134,7 +101,6 @@ class UpstashRedis:
             return None
     
     def ping(self):
-        """Ping Redis server"""
         try:
             result = self._request('PING')
             return result == 'PONG'
@@ -151,19 +117,17 @@ try:
     
     if UPSTASH_REDIS_URL and UPSTASH_REDIS_TOKEN:
         redis = UpstashRedis(UPSTASH_REDIS_URL, UPSTASH_REDIS_TOKEN)
-        # Test connection
         if redis.ping():
             REDIS_AVAILABLE = True
-            logger.info("✅ Upstash Redis connected successfully via REST API!")
+            logger.info("✅ Upstash Redis connected successfully!")
         else:
             logger.error("❌ Failed to ping Redis")
     else:
-        logger.warning("⚠️ Upstash Redis credentials not configured, using file storage")
+        logger.warning("⚠️ Upstash Redis credentials not configured")
         
 except ImportError:
-    logger.warning("⚠️ Config import failed, using file storage")
-    redis = None
     REDIS_AVAILABLE = False
+    logger.warning("⚠️ Redis not available")
 except Exception as e:
     logger.error(f"❌ Redis initialization error: {e}")
     redis = None
@@ -173,15 +137,140 @@ except Exception as e:
 REDIS_KEY_POSTS = "social_feed:posts"
 REDIS_KEY_HISTORY = "social_feed:history"
 REDIS_KEY_SCHEDULED = "social_feed:scheduled"
+REDIS_KEY_PROCESSED = "social_feed:processed"
+REDIS_KEY_REMOVED = "social_feed:removed"  # For manually removed posts
 
 # ============================================================
-# PERSISTENT STORAGE - Upstash Redis with fallback
+# POST TRACKING SYSTEM
 # ============================================================
 
-import tempfile
+def get_processed_posts():
+    """Get list of processed post IDs"""
+    try:
+        if REDIS_AVAILABLE and redis:
+            data = redis.get(REDIS_KEY_PROCESSED)
+            if data:
+                return set(json.loads(data))
+        return set()
+    except Exception as e:
+        logger.error(f"Error getting processed posts: {e}")
+        return set()
+
+def mark_post_as_processed(post_id):
+    """Mark a post as processed (posted or scheduled)"""
+    try:
+        if REDIS_AVAILABLE and redis:
+            processed = get_processed_posts()
+            processed.add(str(post_id))
+            redis.set(REDIS_KEY_PROCESSED, json.dumps(list(processed)))
+            logger.info(f"✅ Marked post {post_id} as processed")
+            return True
+    except Exception as e:
+        logger.error(f"Error marking post as processed: {e}")
+    return False
+
+def clear_processed_posts():
+    """Clear processed posts tracking"""
+    try:
+        if REDIS_AVAILABLE and redis:
+            redis.delete(REDIS_KEY_PROCESSED)
+            return True
+    except Exception as e:
+        logger.error(f"Error clearing processed posts: {e}")
+    return False
+
+# ============================================================
+# REMOVED POSTS TRACKING (for manual removal)
+# ============================================================
+
+def get_removed_posts():
+    """Get list of manually removed post IDs"""
+    try:
+        if REDIS_AVAILABLE and redis:
+            data = redis.get(REDIS_KEY_REMOVED)
+            if data:
+                return set(json.loads(data))
+        return set()
+    except Exception as e:
+        logger.error(f"Error getting removed posts: {e}")
+        return set()
+
+def mark_post_as_removed(post_id):
+    """Mark a post as manually removed"""
+    try:
+        if REDIS_AVAILABLE and redis:
+            removed = get_removed_posts()
+            removed.add(str(post_id))
+            redis.set(REDIS_KEY_REMOVED, json.dumps(list(removed)))
+            logger.info(f"🗑️ Marked post {post_id} as removed")
+            return True
+    except Exception as e:
+        logger.error(f"Error marking post as removed: {e}")
+    return False
+
+def clear_removed_posts():
+    """Clear removed posts tracking"""
+    try:
+        if REDIS_AVAILABLE and redis:
+            redis.delete(REDIS_KEY_REMOVED)
+            return True
+    except Exception as e:
+        logger.error(f"Error clearing removed posts: {e}")
+    return False
+
+# ============================================================
+# DOWNLOAD POST AS JPG
+# ============================================================
+
+def create_post_image(post_text, source_name=None):
+    """Create a JPG image from post text"""
+    try:
+        # Create image
+        img = Image.new('RGB', (800, 600), color='white')
+        draw = ImageDraw.Draw(img)
+        
+        # Try to load a font, fallback to default
+        try:
+            font = ImageFont.truetype("arial.ttf", 18)
+            title_font = ImageFont.truetype("arial.ttf", 24)
+        except:
+            font = ImageFont.load_default()
+            title_font = ImageFont.load_default()
+        
+        # Draw header
+        draw.rectangle([0, 0, 800, 60], fill='#667eea')
+        draw.text((20, 15), "📱 Social Feed Post", fill='white', font=title_font)
+        
+        # Draw source if available
+        if source_name:
+            draw.text((20, 70), f"Source: {source_name}", fill='#666', font=font)
+        
+        # Draw content with word wrap
+        y_position = 110
+        wrapped_text = textwrap.wrap(post_text, width=50)
+        for line in wrapped_text[:20]:  # Max 20 lines
+            draw.text((20, y_position), line, fill='#333', font=font)
+            y_position += 30
+        
+        # Draw footer
+        draw.rectangle([0, 570, 800, 600], fill='#f0f0f0')
+        draw.text((20, 575), f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", fill='#999', font=font)
+        
+        # Save to bytes
+        img_bytes = BytesIO()
+        img.save(img_bytes, format='JPEG', quality=90)
+        img_bytes.seek(0)
+        
+        return img_bytes
+    except Exception as e:
+        logger.error(f"Error creating post image: {e}")
+        return None
+
+# ============================================================
+# PERSISTENT STORAGE
+# ============================================================
 
 def get_data_dir():
-    """Get a writable directory (works on Vercel)"""
     if os.path.exists('/tmp'):
         return '/tmp'
     return os.path.dirname(os.path.abspath(__file__))
@@ -191,7 +280,6 @@ POSTS_FILE_FALLBACK = os.path.join(DATA_DIR, 'posts_cache.json')
 HISTORY_FILE_FALLBACK = os.path.join(DATA_DIR, 'post_history.json')
 
 def save_posts(posts):
-    """Save posts to Redis or fallback to file"""
     try:
         if REDIS_AVAILABLE and redis:
             data = {
@@ -199,85 +287,48 @@ def save_posts(posts):
                 'last_updated': datetime.now().isoformat(),
                 'count': len(posts)
             }
-            redis.set(REDIS_KEY_POSTS, json.dumps(data), ex=86400)  # 24 hour TTL
+            redis.set(REDIS_KEY_POSTS, json.dumps(data), ex=86400)
             logger.info(f"💾 Saved {len(posts)} posts to Redis")
             return True
         else:
             return save_posts_fallback(posts)
     except Exception as e:
-        logger.error(f"Error saving posts to Redis: {e}")
+        logger.error(f"Error saving posts: {e}")
         return save_posts_fallback(posts)
 
 def load_posts():
-    """Load posts from Redis or fallback to file"""
     try:
         if REDIS_AVAILABLE and redis:
             data = redis.get(REDIS_KEY_POSTS)
             if data:
                 parsed = json.loads(data)
-                logger.info(f"📂 Loaded {parsed.get('count', 0)} posts from Redis")
                 return parsed.get('posts', [])
         return load_posts_fallback()
     except Exception as e:
-        logger.error(f"Error loading posts from Redis: {e}")
+        logger.error(f"Error loading posts: {e}")
         return load_posts_fallback()
 
 def save_history(history):
-    """Save history to Redis or fallback to file"""
     try:
         if REDIS_AVAILABLE and redis:
-            redis.set(REDIS_KEY_HISTORY, json.dumps(history), ex=2592000)  # 30 day TTL
-            logger.info(f"💾 Saved {len(history)} history entries to Redis")
+            redis.set(REDIS_KEY_HISTORY, json.dumps(history), ex=2592000)
             return True
         else:
             return save_history_fallback(history)
     except Exception as e:
-        logger.error(f"Error saving history to Redis: {e}")
+        logger.error(f"Error saving history: {e}")
         return save_history_fallback(history)
 
 def load_history():
-    """Load history from Redis or fallback to file"""
     try:
         if REDIS_AVAILABLE and redis:
             data = redis.get(REDIS_KEY_HISTORY)
             if data:
-                history = json.loads(data)
-                logger.info(f"📂 Loaded {len(history)} history entries from Redis")
-                return history
+                return json.loads(data)
         return load_history_fallback()
     except Exception as e:
-        logger.error(f"Error loading history from Redis: {e}")
+        logger.error(f"Error loading history: {e}")
         return load_history_fallback()
-
-def save_scheduled_posts(posts):
-    """Save scheduled posts to Redis"""
-    try:
-        if REDIS_AVAILABLE and redis:
-            redis.set(REDIS_KEY_SCHEDULED, json.dumps(posts), ex=2592000)
-            logger.info(f"💾 Saved {len(posts)} scheduled posts to Redis")
-            return True
-        return False
-    except Exception as e:
-        logger.error(f"Error saving scheduled posts: {e}")
-        return False
-
-def load_scheduled_posts():
-    """Load scheduled posts from Redis"""
-    try:
-        if REDIS_AVAILABLE and redis:
-            data = redis.get(REDIS_KEY_SCHEDULED)
-            if data:
-                scheduled = json.loads(data)
-                logger.info(f"📂 Loaded {len(scheduled)} scheduled posts from Redis")
-                return scheduled
-        return []
-    except Exception as e:
-        logger.error(f"Error loading scheduled posts: {e}")
-        return []
-
-# ============================================================
-# FALLBACK FILE STORAGE (for local development)
-# ============================================================
 
 def save_posts_fallback(posts):
     try:
@@ -320,29 +371,8 @@ def load_history_fallback():
         logger.error(f"Error loading history from file: {e}")
     return []
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # ============================================================
-# FACEBOOK POSTER CLASS - SIMPLIFIED (NO MANUAL UPLOAD)
+# FACEBOOK POSTER CLASS
 # ============================================================
 
 os.environ['PYTHONHTTPSVERIFY'] = '0'
@@ -360,313 +390,127 @@ class FacebookPoster:
         }
         self.client = Zernio(api_key=self.api_key)
         logger.info(f"📘 Facebook Poster initialized with Profile ID: {self.page_id}")
-        logger.info(f"🌍 Timezone: {self.timezone}")
-        logger.info(f"⏰ Min schedule: {self.min_schedule_minutes} minutes ahead")
     
     def _extract_post_data(self, post_response):
-        """Extract post ID and URL from Zernio response"""
         try:
             post_id = None
             post_url = None
             
-            # Try SDK response format (has 'post' attribute)
             if hasattr(post_response, 'post'):
                 post_obj = post_response.post
                 if hasattr(post_obj, 'field_id'):
                     post_id = post_obj.field_id
                 elif hasattr(post_obj, 'id'):
                     post_id = post_obj.id
-                elif hasattr(post_obj, '_id'):
-                    post_id = post_obj._id
                 
                 if hasattr(post_obj, 'platforms') and len(post_obj.platforms) > 0:
                     platform = post_obj.platforms[0]
                     if hasattr(platform, 'platformPostUrl'):
                         post_url = str(platform.platformPostUrl)
             
-            # Try dict response
             elif isinstance(post_response, dict):
-                # Check for data.post format
                 if 'data' in post_response and 'post' in post_response['data']:
                     post_data = post_response['data']['post']
-                    post_id = post_data.get('_id') or post_data.get('id') or post_data.get('field_id')
-                    platforms = post_data.get('platforms', [])
-                    if platforms and len(platforms) > 0:
-                        post_url = platforms[0].get('platformPostUrl')
+                    post_id = post_data.get('_id') or post_data.get('id')
                 else:
-                    # Direct response
-                    post_id = post_response.get('id') or post_response.get('post_id') or post_response.get('field_id')
+                    post_id = post_response.get('id') or post_response.get('post_id')
                     post_url = post_response.get('url') or post_response.get('post_url')
-                    
-                    # Check inside 'post' key
-                    if 'post' in post_response and isinstance(post_response['post'], dict):
-                        post_data = post_response['post']
-                        if not post_id:
-                            post_id = post_data.get('id') or post_data.get('field_id') or post_data.get('_id')
-                        if not post_url:
-                            post_url = post_data.get('url') or post_data.get('post_url')
 
             if not post_url and post_id:
                 post_url = f"https://www.facebook.com/{self.page_id}/posts/{post_id}"
 
-            if not post_id:
-                post_id = "success"
-
-            return post_id, post_url
+            return post_id or "success", post_url
         except Exception as e:
             logger.error(f"Error extracting post data: {e}")
             return "success", None
     
     def _clean_status(self, status):
-        """Clean up status string from enum"""
         if not status:
             return "unknown"
         status_str = str(status)
         if 'Status11.' in status_str:
             status_str = status_str.replace('Status11.', '')
-        if 'status11.' in status_str:
-            status_str = status_str.replace('status11.', '')
         return status_str.lower()
     
-    # ============================================================
-    # POST NOW METHODS - Using SDK Directly
-    # ============================================================
-    
     def post_text(self, content):
-        """
-        Post text only to Facebook immediately
-        Matches Node.js postText function
-        """
         try:
-            logger.info(f"📤 Posting text: {content[:50]}...")
-            
-            # Use SDK directly - matches Node.js format
             response = self.client.posts.create(
                 content=content,
-                platforms=[
-                    {"platform": "facebook", "accountId": self.page_id}
-                ],
+                platforms=[{"platform": "facebook", "accountId": self.page_id}],
                 publish_now=True
             )
-            
-            # Extract post details
             post_id, post_url = self._extract_post_data(response)
-            
-            logger.info(f"✅ Post published! ID: {post_id}")
-            logger.info(f"🔗 URL: {post_url}")
-            
-            return {
-                "success": True,
-                "post_id": post_id,
-                "url": post_url,
-                "message": "Post published successfully"
-            }
-                
+            return {"success": True, "post_id": post_id, "url": post_url}
         except Exception as e:
-            logger.error(f"❌ Failed to post: {e}")
-            if hasattr(e, 'response') and e.response:
-                logger.error(f"Response: {e.response.text[:500]}")
             return {"success": False, "error": str(e)}
     
     def post_with_image(self, content, image_url):
-        """
-        Post with an image to Facebook immediately
-        Matches Node.js postWithImage function
-        """
         try:
-            logger.info(f"📤 Posting with image: {content[:50]}...")
-            logger.info(f"🖼️ Image: {image_url}")
-            
-            # Use SDK directly with mediaItems - matches Node.js format
             response = self.client.posts.create(
                 content=content,
-                media_items=[
-                    {"url": image_url, "type": "image"}
-                ],
-                platforms=[
-                    {"platform": "facebook", "accountId": self.page_id}
-                ],
+                media_items=[{"url": image_url, "type": "image"}],
+                platforms=[{"platform": "facebook", "accountId": self.page_id}],
                 publish_now=True
             )
-            
-            # Extract post details
             post_id, post_url = self._extract_post_data(response)
-            
-            logger.info(f"✅ Post with image published! ID: {post_id}")
-            logger.info(f"🔗 URL: {post_url}")
-            
-            return {
-                "success": True,
-                "post_id": post_id,
-                "url": post_url,
-                "message": "Post with image published successfully"
-            }
-                
+            return {"success": True, "post_id": post_id, "url": post_url}
         except Exception as e:
-            logger.error(f"❌ Failed to post with image: {e}")
-            if hasattr(e, 'response') and e.response:
-                logger.error(f"Response: {e.response.text[:500]}")
             return {"success": False, "error": str(e)}
     
     def post_with_images(self, content, image_urls):
-        """
-        Post with multiple images to Facebook immediately
-        Matches Node.js postWithImages function
-        """
         try:
-            logger.info(f"📤 Posting with {len(image_urls)} images...")
-            logger.info(f"  📝 Content: {content[:50]}...")
-            
-            # Create media items array - matches Node.js format
-            media_items = [
-                {"url": url, "type": "image"}
-                for url in image_urls[:5]  # Max 5 images
-            ]
-            
-            # Use SDK directly with mediaItems
+            media_items = [{"url": url, "type": "image"} for url in image_urls[:5]]
             response = self.client.posts.create(
                 content=content,
                 media_items=media_items,
-                platforms=[
-                    {"platform": "facebook", "accountId": self.page_id}
-                ],
+                platforms=[{"platform": "facebook", "accountId": self.page_id}],
                 publish_now=True
             )
-            
-            # Extract post details
             post_id, post_url = self._extract_post_data(response)
-            
-            logger.info(f"✅ Post with {len(media_items)} images published! ID: {post_id}")
-            logger.info(f"🔗 URL: {post_url}")
-            
-            return {
-                "success": True,
-                "post_id": post_id,
-                "url": post_url,
-                "message": f"Post with {len(media_items)} images published successfully"
-            }
-                
+            return {"success": True, "post_id": post_id, "url": post_url}
         except Exception as e:
-            logger.error(f"❌ Failed to post with images: {e}")
-            if hasattr(e, 'response') and e.response:
-                logger.error(f"Response: {e.response.text[:500]}")
             return {"success": False, "error": str(e)}
     
-    # ============================================================
-    # SCHEDULE POST METHOD - Using SDK Directly
-    # ============================================================
-    
     def schedule_post(self, content, scheduled_time_iso, image_urls=None):
-        """
-        Schedule a post for later using the Zernio SDK.
-        
-        IMPORTANT: Use local time WITHOUT timezone suffix + timezone parameter.
-        Example: scheduled_for="2026-08-03T14:30:00", timezone="Africa/Nairobi"
-        """
         try:
-            logger.info(f"📅 Scheduling post for: {scheduled_time_iso}")
-            logger.info(f"🌍 Timezone: {self.timezone}")
-            
-            # Parse the time to check if it's in the future
             local_tz = pytz.timezone(self.timezone)
             try:
                 scheduled_dt = datetime.fromisoformat(scheduled_time_iso)
                 scheduled_dt = local_tz.localize(scheduled_dt)
                 now_dt = datetime.now(local_tz)
-                
                 time_diff = (scheduled_dt - now_dt).total_seconds()
                 
-                min_seconds = self.min_schedule_minutes * 60
-                if time_diff < min_seconds:
-                    error_msg = f"Scheduled time must be at least {self.min_schedule_minutes} minutes in the future. Currently {time_diff/60:.1f} minutes"
-                    logger.error(f"❌ {error_msg}")
-                    return {
-                        "success": False, 
-                        "error": error_msg
-                    }
-                
-                logger.info(f"✅ Time is valid: {time_diff/60:.1f} minutes in the future")
-                
+                if time_diff < self.min_schedule_minutes * 60:
+                    return {"success": False, "error": f"Scheduled time must be at least {self.min_schedule_minutes} minutes in the future"}
             except Exception as e:
-                logger.warning(f"⚠️ Could not parse time: {e}")
-                return {
-                    "success": False,
-                    "error": f"Invalid time format: {scheduled_time_iso}"
-                }
+                return {"success": False, "error": f"Invalid time format: {scheduled_time_iso}"}
             
-            # Prepare media items - matches Node.js format
             media_items = None
             if image_urls:
-                media_items = [
-                    {"url": url, "type": "image"}
-                    for url in image_urls[:5]  # Max 5 images
-                ]
-                logger.info(f"📸 Including {len(media_items)} image(s)")
+                media_items = [{"url": url, "type": "image"} for url in image_urls[:5]]
             
-            # Create the scheduled post using the SDK
-            try:
-                post_data = {
-                    "content": content,
-                    "platforms": [
-                        {
-                            "platform": "facebook",
-                            "accountId": self.page_id
-                        }
-                    ],
-                    "scheduled_for": scheduled_time_iso,
-                    "timezone": self.timezone
-                }
-                
-                if media_items:
-                    post_data["media_items"] = media_items
-                
-                response = self.client.posts.create(**post_data)
-                
-                # Extract post details
-                post_id = None
-                status = None
-                scheduled_for = None
-                
-                if hasattr(response, 'post'):
-                    post_obj = response.post
-                    if hasattr(post_obj, 'field_id'):
-                        post_id = post_obj.field_id
-                    if hasattr(post_obj, 'status'):
-                        status = self._clean_status(post_obj.status)
-                    if hasattr(post_obj, 'scheduled_for'):
-                        scheduled_for = str(post_obj.scheduled_for)
-                
-                logger.info(f"✅ Post scheduled! ID: {post_id or 'success'} Status: {status}")
-                
-                return {
-                    "success": True,
-                    "post_id": post_id or "scheduled",
-                    "scheduled_for": scheduled_for or scheduled_time_iso,
-                    "status": status,
-                    "has_images": bool(media_items),
-                    "image_count": len(media_items) if media_items else 0,
-                    "message": f"Post scheduled successfully (Status: {status})"
-                }
-                
-            except Exception as e:
-                error_msg = str(e)
-                logger.error(f"❌ Failed to create scheduled post: {error_msg}")
-                if hasattr(e, 'response') and e.response:
-                    logger.error(f"Response: {e.response.text[:500]}")
-                    if '409' in str(e.response.status_code) or 'already scheduled' in e.response.text:
-                        error_msg = "This content was already scheduled recently. Please use different content."
-                return {"success": False, "error": error_msg}
+            post_data = {
+                "content": content,
+                "platforms": [{"platform": "facebook", "accountId": self.page_id}],
+                "scheduled_for": scheduled_time_iso,
+                "timezone": self.timezone
+            }
+            if media_items:
+                post_data["media_items"] = media_items
             
+            response = self.client.posts.create(**post_data)
+            post_id, _ = self._extract_post_data(response)
+            return {"success": True, "post_id": post_id, "scheduled_for": scheduled_time_iso}
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"❌ Failed to schedule post: {error_msg}")
+            if '409' in error_msg or 'already scheduled' in error_msg:
+                error_msg = "This content was already scheduled recently. Please use different content."
             return {"success": False, "error": error_msg}
 
-# Create Facebook poster instance
 facebook_poster = FacebookPoster()
 
 # ============================================================
-# HTML DASHBOARD - COMPLETE WITH VALIDATION
+# HTML DASHBOARD - COMPLETE WITH PERSISTENT REMOVAL
 # ============================================================
 
 DASHBOARD_HTML = r'''
@@ -679,52 +523,19 @@ DASHBOARD_HTML = r'''
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-            background: #f0f2f5;
-            color: #1a1a2e;
-            min-height: 100vh;
-        }
+        body { font-family: 'Inter', sans-serif; background: #f0f2f5; color: #1a1a2e; min-height: 100vh; }
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #c1c7cd; border-radius: 10px; }
         
-        .header {
-            background: #ffffff;
-            border-bottom: 1px solid #e9ecef;
-            padding: 16px 32px;
-            position: sticky;
-            top: 0;
-            z-index: 100;
-        }
-        .header-content {
-            max-width: 1400px;
-            margin: 0 auto;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 16px;
-        }
+        .header { background: #ffffff; border-bottom: 1px solid #e9ecef; padding: 16px 32px; position: sticky; top: 0; z-index: 100; }
+        .header-content { max-width: 1400px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }
         .header-left { display: flex; align-items: center; gap: 16px; }
         .logo { display: flex; align-items: center; gap: 10px; }
-        .logo-icon {
-            width: 38px; height: 38px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            border-radius: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 20px;
-            color: white;
-        }
+        .logo-icon { width: 38px; height: 38px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 20px; color: white; }
         .logo h1 { font-size: 22px; font-weight: 800; color: #1a1a2e; }
         .logo h1 span { color: #667eea; }
-        .badge {
-            background: #e9ecef; color: #495057;
-            padding: 2px 12px; border-radius: 20px;
-            font-size: 11px; font-weight: 600;
-        }
+        .badge { background: #e9ecef; color: #495057; padding: 2px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; }
         .badge.live { background: #28a745; color: white; animation: pulse 2s infinite; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
         
@@ -735,19 +546,11 @@ DASHBOARD_HTML = r'''
         .stat-mini .label { font-size: 10px; color: #868e96; text-transform: uppercase; font-weight: 600; }
         
         .btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
-        .btn {
-            padding: 9px 20px; border: none; border-radius: 8px;
-            font-weight: 600; font-size: 13px; cursor: pointer;
-            transition: all 0.25s ease;
-            display: flex; align-items: center; gap: 8px;
-            font-family: 'Inter', sans-serif;
-        }
+        .btn { padding: 9px 20px; border: none; border-radius: 8px; font-weight: 600; font-size: 13px; cursor: pointer; transition: all 0.25s ease; display: flex; align-items: center; gap: 8px; font-family: 'Inter', sans-serif; }
         .btn-primary { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
         .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(102,126,234,0.4); }
         .btn-facebook { background: #1877f2; color: white; }
         .btn-facebook:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(24,119,242,0.3); }
-        .btn-success { background: #28a745; color: white; }
-        .btn-success:hover { transform: translateY(-2px); }
         .btn-warning { background: #ffc107; color: #1a1a2e; }
         .btn-warning:hover { transform: translateY(-2px); }
         .btn-secondary { background: #e9ecef; color: #495057; }
@@ -759,99 +562,43 @@ DASHBOARD_HTML = r'''
         .btn.loading .btn-text { display: none; }
         @keyframes spin { to { transform: rotate(360deg); } }
         
-        .toast-container {
-            position: fixed; top: 80px; right: 24px; z-index: 999;
-            display: flex; flex-direction: column; gap: 10px;
-        }
-        .toast {
-            background: #1a1a2e; color: white; padding: 14px 24px;
-            border-radius: 12px; font-size: 14px; font-weight: 500;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-            animation: slideIn 0.4s ease; min-width: 280px;
-            display: flex; align-items: center; gap: 12px;
-        }
+        .toast-container { position: fixed; top: 80px; right: 24px; z-index: 999; display: flex; flex-direction: column; gap: 10px; }
+        .toast { background: #1a1a2e; color: white; padding: 14px 24px; border-radius: 12px; font-size: 14px; font-weight: 500; box-shadow: 0 10px 40px rgba(0,0,0,0.2); animation: slideIn 0.4s ease; min-width: 280px; display: flex; align-items: center; gap: 12px; }
         .toast.success { border-left: 4px solid #28a745; }
         .toast.error { border-left: 4px solid #dc3545; }
         .toast.warning { border-left: 4px solid #ffc107; }
         .toast.info { border-left: 4px solid #667eea; }
-        @keyframes slideIn {
-            from { opacity: 0; transform: translateX(100px); }
-            to { opacity: 1; transform: translateX(0); }
-        }
+        @keyframes slideIn { from { opacity: 0; transform: translateX(100px); } to { opacity: 1; transform: translateX(0); } }
         .toast .icon { font-size: 20px; }
         .toast .msg { flex: 1; }
         .toast .close { cursor: pointer; opacity: 0.5; transition: opacity 0.2s; font-size: 18px; }
         .toast .close:hover { opacity: 1; }
         
-        .stats-grid {
-            display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 16px; padding: 24px 32px 0; max-width: 1400px; margin: 0 auto;
-        }
-        .stat-card {
-            background: #ffffff; border-radius: 12px; padding: 18px 22px;
-            border: 1px solid #e9ecef; transition: all 0.2s ease;
-        }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; padding: 24px 32px 0; max-width: 1400px; margin: 0 auto; }
+        .stat-card { background: #ffffff; border-radius: 12px; padding: 18px 22px; border: 1px solid #e9ecef; transition: all 0.2s ease; }
         .stat-card:hover { border-color: #667eea; box-shadow: 0 4px 20px rgba(102,126,234,0.08); }
         .stat-card .value { font-size: 26px; font-weight: 800; color: #1a1a2e; }
         .stat-card .label { color: #868e96; font-size: 13px; font-weight: 500; margin-top: 2px; }
         .stat-card .icon { font-size: 22px; margin-bottom: 4px; }
         
-        .tabs {
-            display: flex; gap: 4px; background: #ffffff; padding: 4px;
-            border-radius: 12px; border: 1px solid #e9ecef;
-            margin: 16px 32px 0; max-width: 1400px;
-        }
-        .tab-btn {
-            padding: 10px 24px; border: none; border-radius: 8px;
-            background: transparent; color: #868e96;
-            font-weight: 600; font-size: 14px; cursor: pointer;
-            transition: all 0.2s ease; font-family: 'Inter', sans-serif;
-            flex: 1;
-        }
+        .tabs { display: flex; gap: 4px; background: #ffffff; padding: 4px; border-radius: 12px; border: 1px solid #e9ecef; margin: 16px 32px 0; max-width: 1400px; }
+        .tab-btn { padding: 10px 24px; border: none; border-radius: 8px; background: transparent; color: #868e96; font-weight: 600; font-size: 14px; cursor: pointer; transition: all 0.2s ease; font-family: 'Inter', sans-serif; flex: 1; }
         .tab-btn:hover { background: #f1f3f5; color: #1a1a2e; }
-        .tab-btn.active {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white; box-shadow: 0 4px 15px rgba(102,126,234,0.3);
-        }
+        .tab-btn.active { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; box-shadow: 0 4px 15px rgba(102,126,234,0.3); }
         .tab-content { display: none; padding: 20px 32px; max-width: 1400px; margin: 0 auto; }
         .tab-content.active { display: block; }
         
-        .filters {
-            display: flex; gap: 8px; flex-wrap: wrap;
-            background: #ffffff; padding: 8px; border-radius: 12px;
-            border: 1px solid #e9ecef; margin-bottom: 20px;
-        }
-        .filter-btn {
-            padding: 8px 18px; border: none; border-radius: 8px;
-            background: transparent; color: #868e96;
-            font-weight: 600; font-size: 13px; cursor: pointer;
-            transition: all 0.2s ease; font-family: 'Inter', sans-serif;
-        }
+        .filters { display: flex; gap: 8px; flex-wrap: wrap; background: #ffffff; padding: 8px; border-radius: 12px; border: 1px solid #e9ecef; margin-bottom: 20px; }
+        .filter-btn { padding: 8px 18px; border: none; border-radius: 8px; background: transparent; color: #868e96; font-weight: 600; font-size: 13px; cursor: pointer; transition: all 0.2s ease; font-family: 'Inter', sans-serif; }
         .filter-btn:hover { background: #f1f3f5; color: #1a1a2e; }
-        .filter-btn.active {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white; box-shadow: 0 4px 15px rgba(102,126,234,0.3);
-        }
-        .filter-btn .count {
-            background: rgba(255,255,255,0.2);
-            padding: 1px 8px; border-radius: 10px; font-size: 11px; margin-left: 4px;
-        }
+        .filter-btn.active { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; box-shadow: 0 4px 15px rgba(102,126,234,0.3); }
+        .filter-btn .count { background: rgba(255,255,255,0.2); padding: 1px 8px; border-radius: 10px; font-size: 11px; margin-left: 4px; }
         .filter-btn.active .count { background: rgba(255,255,255,0.2); }
         
-        .posts-grid {
-            display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-            gap: 24px;
-        }
-        .post-card {
-            background: #ffffff; border-radius: 16px; overflow: hidden;
-            border: 1px solid #e9ecef; transition: all 0.3s cubic-bezier(0.25,0.46,0.45,0.94);
-            animation: fadeInUp 0.5s ease forwards; opacity: 0;
-        }
+        .posts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 24px; }
+        .post-card { background: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid #e9ecef; transition: all 0.3s cubic-bezier(0.25,0.46,0.45,0.94); animation: fadeInUp 0.5s ease forwards; opacity: 0; }
         .post-card:hover { transform: translateY(-4px); box-shadow: 0 12px 40px rgba(0,0,0,0.08); border-color: #667eea; }
-        @keyframes fadeInUp {
-            from { opacity: 0; transform: translateY(16px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
+        @keyframes fadeInUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
         .post-card:nth-child(1) { animation-delay: 0.03s; }
         .post-card:nth-child(2) { animation-delay: 0.06s; }
         .post-card:nth-child(3) { animation-delay: 0.09s; }
@@ -862,123 +609,86 @@ DASHBOARD_HTML = r'''
         .post-card:nth-child(8) { animation-delay: 0.24s; }
         .post-card:nth-child(9) { animation-delay: 0.27s; }
         
-        .post-image-wrap {
-            position: relative; width: 100%; padding-top: 56.25%;
-            background: #f8f9fa; overflow: hidden;
-        }
-        .post-image-wrap img {
-            position: absolute; top: 0; left: 0;
-            width: 100%; height: 100%; object-fit: cover;
-            transition: transform 0.5s ease;
-        }
+        .post-image-wrap { position: relative; width: 100%; padding-top: 56.25%; background: #f8f9fa; overflow: hidden; }
+        .post-image-wrap img { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; transition: transform 0.5s ease; }
         .post-card:hover .post-image-wrap img { transform: scale(1.02); }
-        .post-image-wrap .no-image {
-            position: absolute; top: 50%; left: 50%;
-            transform: translate(-50%, -50%); font-size: 40px; opacity: 0.2;
+        .post-image-wrap .no-image { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 40px; opacity: 0.2; }
+        .post-source-tag { position: absolute; top: 12px; left: 12px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 4px 14px; border-radius: 20px; font-size: 11px; font-weight: 600; color: #667eea; border: 1px solid rgba(102,126,234,0.2); }
+        .post-status-badge { position: absolute; top: 12px; right: 50px; padding: 4px 12px; border-radius: 20px; font-size: 10px; font-weight: 600; background: #28a745; color: white; }
+        
+        .btn-remove {
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            background: rgba(220, 53, 69, 0.9);
+            color: white;
+            border: none;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            font-size: 16px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.25s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            line-height: 1;
+            z-index: 10;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.2);
         }
-        .post-source-tag {
-            position: absolute; top: 12px; left: 12px;
-            background: rgba(0,0,0,0.75); backdrop-filter: blur(10px);
-            padding: 4px 14px; border-radius: 20px;
-            font-size: 11px; font-weight: 600; color: #667eea;
-            border: 1px solid rgba(102,126,234,0.2);
+        .btn-remove:hover {
+            background: #dc3545;
+            transform: scale(1.1);
+            box-shadow: 0 4px 15px rgba(220, 53, 69, 0.4);
         }
+        .btn-remove:active {
+            transform: scale(0.9);
+        }
+        
         .post-content { padding: 18px 20px 16px; }
-        .post-text {
-            font-size: 14px; line-height: 1.7; color: #2d3436;
-            margin-bottom: 14px;
-            display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden;
-        }
+        .post-text { font-size: 14px; line-height: 1.7; color: #2d3436; margin-bottom: 14px; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
         .post-text.quoted { border-left: 3px solid #667eea; padding-left: 14px; font-style: italic; color: #636e72; }
         .post-text .hashtag { color: #667eea; font-weight: 500; }
-        .post-meta {
-            display: flex; justify-content: space-between; align-items: center;
-            flex-wrap: wrap; gap: 10px; padding-top: 14px;
-            border-top: 1px solid #f1f3f5;
-        }
+        .post-meta { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; padding-top: 14px; border-top: 1px solid #f1f3f5; }
         .post-time { font-size: 12px; color: #adb5bd; }
         
-        .btn-download {
-            background: #28a745; color: white; border: none; padding: 6px 16px;
-            border-radius: 8px; font-size: 12px; font-weight: 600;
-            cursor: pointer; transition: all 0.25s ease;
-            display: flex; align-items: center; gap: 6px;
-            font-family: 'Inter', sans-serif;
-        }
+        .btn-download { background: linear-gradient(135deg, #28a745 0%, #20c997 100%); color: white; border: none; padding: 6px 16px; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.25s ease; display: flex; align-items: center; gap: 6px; font-family: 'Inter', sans-serif; }
         .btn-download:hover { transform: translateY(-2px); box-shadow: 0 4px 15px rgba(40,167,69,0.3); }
-        .btn-download.downloaded { background: #6c757d; cursor: default; }
-        .btn-download.downloaded:hover { transform: none; box-shadow: none; }
         
-        .btn-action {
-            background: #667eea; color: white; border: none; padding: 6px 16px;
-            border-radius: 8px; font-size: 12px; font-weight: 600;
-            cursor: pointer; transition: all 0.25s ease;
-            font-family: 'Inter', sans-serif;
-        }
+        .btn-action { background: #667eea; color: white; border: none; padding: 6px 16px; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.25s ease; font-family: 'Inter', sans-serif; }
         .btn-action:hover { transform: translateY(-2px); box-shadow: 0 4px 15px rgba(102,126,234,0.3); }
         .btn-action.post-now { background: #1877f2; }
         .btn-action.post-now:hover { box-shadow: 0 4px 15px rgba(24,119,242,0.3); }
         .btn-action.schedule { background: #ffc107; color: #1a1a2e; }
         .btn-action.schedule:hover { box-shadow: 0 4px 15px rgba(255,193,7,0.3); }
         
-        .loading-state {
-            grid-column: 1/-1; text-align: center; padding: 60px 20px;
-        }
-        .loading-state .loader {
-            width: 40px; height: 40px;
-            border: 3px solid #f1f3f5; border-top-color: #667eea;
-            border-radius: 50%; animation: spin 0.8s linear infinite;
-            margin: 0 auto 16px;
-        }
+        .loading-state { grid-column: 1/-1; text-align: center; padding: 60px 20px; }
+        .loading-state .loader { width: 40px; height: 40px; border: 3px solid #f1f3f5; border-top-color: #667eea; border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 16px; }
         
-        .empty-state {
-            grid-column: 1/-1; text-align: center; padding: 80px 20px;
-        }
+        .empty-state { grid-column: 1/-1; text-align: center; padding: 80px 20px; }
         .empty-state .icon { font-size: 72px; margin-bottom: 16px; opacity: 0.3; }
         .empty-state h3 { color: #868e96; font-weight: 500; font-size: 22px; margin-bottom: 8px; }
         .empty-state p { color: #adb5bd; font-size: 15px; }
         
-        .schedule-form {
-            background: #ffffff; border-radius: 16px; padding: 24px;
-            border: 1px solid #e9ecef; margin-bottom: 24px;
-        }
+        .schedule-form { background: #ffffff; border-radius: 16px; padding: 24px; border: 1px solid #e9ecef; margin-bottom: 24px; }
         .schedule-form h2 { margin-bottom: 20px; font-size: 24px; }
         .schedule-form .subtitle { color: #868e96; font-size: 14px; margin-bottom: 20px; }
         .form-group { margin-bottom: 16px; }
-        .form-group label {
-            display: block; font-weight: 600; margin-bottom: 6px;
-            font-size: 14px; color: #495057;
-        }
-        .form-group input, .form-group textarea, .form-group select {
-            width: 100%; padding: 10px 12px;
-            border: 1px solid #e9ecef; border-radius: 8px;
-            font-family: 'Inter', sans-serif; font-size: 14px;
-            transition: border-color 0.2s;
-        }
-        .form-group input:focus, .form-group textarea:focus, .form-group select:focus {
-            outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(102,126,234,0.1);
-        }
+        .form-group label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 14px; color: #495057; }
+        .form-group input, .form-group textarea, .form-group select { width: 100%; padding: 10px 12px; border: 1px solid #e9ecef; border-radius: 8px; font-family: 'Inter', sans-serif; font-size: 14px; transition: border-color 0.2s; }
+        .form-group input:focus, .form-group textarea:focus, .form-group select:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(102,126,234,0.1); }
         .form-group textarea { resize: vertical; min-height: 100px; }
         .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
         .form-actions { display: flex; gap: 12px; margin-top: 20px; }
         .form-actions .btn { flex: 1; justify-content: center; }
         
-        .info-box {
-            background: #f0f7ff; border: 1px solid #1877f2; border-radius: 8px;
-            padding: 12px 16px; margin-bottom: 16px;
-            display: flex; justify-content: space-between; align-items: center;
-            flex-wrap: wrap; gap: 10px;
-        }
+        .info-box { background: #f0f7ff; border: 1px solid #1877f2; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
         .info-box .label { font-size: 13px; color: #495057; }
         .info-box .value { font-weight: 600; color: #1877f2; }
         
-        .queue-item {
-            background: #ffffff; padding: 16px 20px;
-            border-radius: 12px; border: 1px solid #e9ecef;
-            margin-bottom: 12px;
-            display: flex; justify-content: space-between; align-items: center;
-            flex-wrap: wrap; gap: 12px;
-        }
+        .queue-item { background: #ffffff; padding: 16px 20px; border-radius: 12px; border: 1px solid #e9ecef; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
         .queue-item:hover { border-color: #667eea; }
         .queue-item .info { flex: 1; min-width: 200px; }
         .queue-item .info .title { font-weight: 600; }
@@ -987,11 +697,7 @@ DASHBOARD_HTML = r'''
         .queue-item .badge-scheduled { background: #ffc107; color: #1a1a2e; padding: 2px 10px; border-radius: 12px; font-size: 11px; }
         .queue-item .actions { display: flex; gap: 8px; flex-wrap: wrap; }
         
-        .footer {
-            text-align: center; padding: 20px 32px;
-            color: #adb5bd; font-size: 13px;
-            border-top: 1px solid #e9ecef; background: #ffffff;
-        }
+        .footer { text-align: center; padding: 20px 32px; color: #adb5bd; font-size: 13px; border-top: 1px solid #e9ecef; background: #ffffff; }
         .footer span { color: #667eea; }
         
         @media (max-width: 768px) {
@@ -1012,6 +718,7 @@ DASHBOARD_HTML = r'''
             .toast-container { top: 70px; right: 12px; left: 12px; }
             .toast { min-width: auto; font-size: 13px; padding: 12px 16px; }
             .info-box { flex-direction: column; text-align: center; }
+            .btn-remove { width: 24px; height: 24px; font-size: 14px; top: 8px; right: 8px; }
         }
     </style>
 </head>
@@ -1187,23 +894,11 @@ DASHBOARD_HTML = r'''
         let allPosts = [];
         let currentFilter = 'all';
         let isLoading = false;
-        let downloadedPosts = new Set();
         let profileId = '';
         
-        // Load downloaded state
-        function loadDownloadedState() {
-            try {
-                const saved = localStorage.getItem('downloadedPosts');
-                if (saved) downloadedPosts = new Set(JSON.parse(saved));
-            } catch (e) {}
-        }
-        function saveDownloadedState() {
-            try {
-                localStorage.setItem('downloadedPosts', JSON.stringify([...downloadedPosts]));
-            } catch (e) {}
-        }
-        
-        // Toast notifications
+        // ============================================================
+        // TOAST NOTIFICATIONS
+        // ============================================================
         function showToast(message, type, duration) {
             type = type || 'info';
             duration = duration || 4000;
@@ -1227,12 +922,45 @@ DASHBOARD_HTML = r'''
         }
         
         // ============================================================
-        // TIME VALIDATION - Must be 5+ minutes in future
+        // REMOVE POST FROM FEED (PERSISTENT - SAVES TO REDIS)
+        // ============================================================
+        async function removePostFromFeed(postId) {
+            if (!confirm('Remove this post from the feed permanently?')) return;
+            
+            try {
+                const response = await fetch('/api/post/remove', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ post_id: postId })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Remove from allPosts array
+                    allPosts = allPosts.filter(function(p) { return p.id !== postId; });
+                    
+                    // Re-render the feed
+                    renderPosts(allPosts);
+                    updateStats(allPosts);
+                    updateFilters(allPosts);
+                    
+                    showToast('🗑️ Post removed from feed permanently', 'success');
+                } else {
+                    throw new Error(data.error || 'Failed to remove');
+                }
+            } catch (error) {
+                showToast('❌ Error: ' + error.message, 'error');
+            }
+        }
+        
+        // ============================================================
+        // TIME VALIDATION
         // ============================================================
         function validateScheduleTime(scheduledTime) {
             const selectedDate = new Date(scheduledTime);
             const now = new Date();
-            const minTime = new Date(now.getTime() + 5 * 60000); // 5 minutes from now
+            const minTime = new Date(now.getTime() + 5 * 60000);
             
             if (selectedDate < minTime) {
                 const minTimeStr = minTime.toLocaleTimeString();
@@ -1241,13 +969,9 @@ DASHBOARD_HTML = r'''
                     message: `⏰ Scheduled time must be at least 5 minutes from now.\nMinimum time: ${minTimeStr}`
                 };
             }
-            
             return { valid: true };
         }
         
-        // ============================================================
-        // Update time hint with minimum allowed time
-        // ============================================================
         function updateTimeHint() {
             const now = new Date();
             const minTime = new Date(now.getTime() + 5 * 60000);
@@ -1259,7 +983,9 @@ DASHBOARD_HTML = r'''
             }
         }
         
-        // Tab switching
+        // ============================================================
+        // TAB SWITCHING
+        // ============================================================
         document.querySelectorAll('.tab-btn').forEach(function(btn) {
             btn.addEventListener('click', function() {
                 document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
@@ -1275,26 +1001,118 @@ DASHBOARD_HTML = r'''
             });
         });
         
-        // Download post
-        function downloadPost(postId) {
+        // ============================================================
+        // DOWNLOAD POST AS JPG
+        // ============================================================
+        async function downloadPostAsJpg(postId) {
+            const post = allPosts.find(function(p) { return p.id === postId; });
+            if (!post) { showToast('❌ Post not found', 'error'); return; }
+            
+            if (post.images && post.images.length > 0) {
+                try {
+                    showToast('🖼️ Downloading image...', 'info');
+                    
+                    const response = await fetch('/api/download/single-image', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            image_url: post.images[0],
+                            filename: `post_${postId}_${new Date().toISOString().slice(0,10)}`
+                        })
+                    });
+                    
+                    if (response.ok) {
+                        const blob = await response.blob();
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        const contentDisposition = response.headers.get('content-disposition');
+                        let filename = `post_${postId}_${new Date().toISOString().slice(0,10)}.jpg`;
+                        if (contentDisposition) {
+                            const match = contentDisposition.match(/filename="?([^"]+)"?/);
+                            if (match) filename = match[1];
+                        }
+                        a.download = filename;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                        
+                        showToast('✅ Image downloaded!', 'success');
+                    } else {
+                        throw new Error('Failed to download image');
+                    }
+                } catch (error) {
+                    showToast('❌ Error: ' + error.message, 'error');
+                    downloadPostAsJpgFallback(postId);
+                }
+            } else {
+                downloadPostAsJpgFallback(postId);
+            }
+        }
+        
+        async function downloadPostAsJpgFallback(postId) {
+            const post = allPosts.find(function(p) { return p.id === postId; });
+            if (!post) { showToast('❌ Post not found', 'error'); return; }
+            
+            try {
+                showToast('🖼️ Generating image...', 'info');
+                
+                const response = await fetch('/api/download/jpg', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text: post.text || 'No text content',
+                        source: post.source_name || 'Unknown'
+                    })
+                });
+                
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `post_${postId}_${new Date().toISOString().slice(0,10)}.jpg`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    
+                    showToast('✅ Downloaded as JPG!', 'success');
+                } else {
+                    throw new Error('Failed to generate image');
+                }
+            } catch (error) {
+                showToast('❌ Error: ' + error.message, 'error');
+                downloadPostAsText(postId);
+            }
+        }
+        
+        function downloadPostAsText(postId) {
             const post = allPosts.find(function(p) { return p.id === postId; });
             if (!post) { showToast('❌ Post not found', 'error'); return; }
             
             let content = '';
-            content += '='.repeat(60) + '\n📱 SOCIAL POST DOWNLOAD\n' + '='.repeat(60) + '\n\n';
+            content += '='.repeat(60) + '\n';
+            content += '📱 SOCIAL POST DOWNLOAD\n';
+            content += '='.repeat(60) + '\n\n';
             content += '📌 SOURCE: ' + (post.source_name || 'Unknown') + '\n';
             content += '🕐 TIME: ' + (post.time || 'N/A') + '\n';
             content += '🔗 LINK: ' + (post.post_link || 'N/A') + '\n\n';
-            content += '-'.repeat(60) + '\n\n📝 CONTENT:\n';
+            content += '-'.repeat(60) + '\n\n';
+            content += '📝 CONTENT:\n';
             content += post.text || '(No text content)';
             content += '\n\n';
             if (post.images && post.images.length > 0) {
-                content += '-'.repeat(60) + '\n🖼️ IMAGES:\n';
+                content += '-'.repeat(60) + '\n';
+                content += '🖼️ IMAGES:\n';
                 post.images.forEach(function(img, i) {
                     content += '  ' + (i+1) + '. ' + img + '\n';
                 });
             }
-            content += '\n' + '='.repeat(60) + '\n📅 Downloaded: ' + new Date().toLocaleString() + '\n' + '='.repeat(60);
+            content += '\n' + '='.repeat(60) + '\n';
+            content += '📅 Downloaded: ' + new Date().toLocaleString() + '\n';
+            content += '='.repeat(60);
             
             const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
             const url = URL.createObjectURL(blob);
@@ -1306,24 +1124,12 @@ DASHBOARD_HTML = r'''
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
             
-            downloadedPosts.add(postId);
-            saveDownloadedState();
-            updateDownloadButtons();
-            showToast('✅ Downloaded: ' + a.download, 'success');
+            showToast('✅ Downloaded as text (fallback)', 'info');
         }
         
-        function updateDownloadButtons() {
-            document.querySelectorAll('.btn-download').forEach(function(btn) {
-                const postId = btn.dataset.postId;
-                if (downloadedPosts.has(postId)) {
-                    btn.classList.add('downloaded');
-                    btn.innerHTML = '✅ Downloaded';
-                    btn.disabled = true;
-                }
-            });
-        }
-        
-        // Fetch posts
+        // ============================================================
+        // FETCH POSTS - ONLY ON BUTTON CLICK
+        // ============================================================
         async function fetchPosts() {
             if (isLoading) return;
             isLoading = true;
@@ -1380,7 +1186,44 @@ DASHBOARD_HTML = r'''
             isLoading = false;
         }
         
-        // Clear cache
+        // ============================================================
+        // LOAD FROM CACHE ON START - NO AUTO-FETCH
+        // ============================================================
+        async function loadFromCacheOnStart() {
+            try {
+                const response = await fetch('/api/cache');
+                const data = await response.json();
+                if (data.success && data.posts.length > 0) {
+                    allPosts = data.posts;
+                    renderPosts(allPosts);
+                    updateStats(allPosts);
+                    updateFilters(allPosts);
+                    document.getElementById('cacheBadge').textContent = 'Cached';
+                    document.getElementById('cacheBadge').style.background = '#28a745';
+                    document.getElementById('cacheBadge').style.color = 'white';
+                    showToast('📂 Loaded ' + allPosts.length + ' posts from cache', 'info');
+                } else {
+                    document.getElementById('cacheBadge').textContent = 'Ready';
+                    document.getElementById('cacheBadge').style.background = '#e9ecef';
+                    document.getElementById('cacheBadge').style.color = '#495057';
+                    const grid = document.getElementById('postsGrid');
+                    grid.innerHTML = `
+                        <div class="empty-state">
+                            <div class="icon">📭</div>
+                            <h3>No Posts Loaded</h3>
+                            <p>Click the "Fetch Posts" button above to load content</p>
+                            <button class="btn btn-primary" onclick="fetchPosts()" style="margin-top:20px;padding:12px 32px;font-size:16px;">🚀 Fetch Posts Now</button>
+                        </div>
+                    `;
+                }
+            } catch (e) {
+                console.error('Error loading cache:', e);
+            }
+        }
+        
+        // ============================================================
+        // CLEAR CACHE
+        // ============================================================
         async function clearCache() {
             if (!confirm('Clear cached posts?')) return;
             try {
@@ -1388,8 +1231,6 @@ DASHBOARD_HTML = r'''
                 const data = await response.json();
                 if (data.success) {
                     allPosts = [];
-                    downloadedPosts.clear();
-                    saveDownloadedState();
                     renderPosts(allPosts);
                     updateStats(allPosts);
                     updateFilters(allPosts);
@@ -1403,7 +1244,9 @@ DASHBOARD_HTML = r'''
             }
         }
         
-        // Render posts
+        // ============================================================
+        // RENDER POSTS - WITH REMOVE BUTTON
+        // ============================================================
         function renderPosts(posts) {
             const grid = document.getElementById('postsGrid');
             let filtered = posts;
@@ -1414,7 +1257,7 @@ DASHBOARD_HTML = r'''
             }
             
             if (!filtered || filtered.length === 0) {
-                grid.innerHTML = '<div class="empty-state"><div class="icon">📭</div><h3>No posts match this filter</h3><p>Try changing the filter or fetching new posts</p></div>';
+                grid.innerHTML = '<div class="empty-state"><div class="icon">📭</div><h3>No posts available</h3><p>All posts have been processed or no posts match the filter</p></div>';
                 return;
             }
             
@@ -1425,7 +1268,6 @@ DASHBOARD_HTML = r'''
                 const isQuote = post.text && post.text.length < 200 && post.text.length > 10;
                 const sourceName = post.source_name || 'Unknown';
                 const sourceInitial = sourceName.charAt(0).toUpperCase();
-                const isDownloaded = downloadedPosts.has(post.id);
                 
                 let displayText = post.text || '';
                 if (displayText.length > 300) displayText = displayText.substring(0, 300) + '...';
@@ -1442,6 +1284,9 @@ DASHBOARD_HTML = r'''
                     html += '<div class="no-image">📄</div>';
                 }
                 html += '<span class="post-source-tag">' + sourceInitial + ' ' + sourceName + '</span>';
+                html += '<span class="post-status-badge">Available</span>';
+                // Remove button (X)
+                html += '<button class="btn-remove" onclick="removePostFromFeed(\'' + post.id + '\')" title="Remove from feed">✕</button>';
                 html += '</div>';
                 html += '<div class="post-content">';
                 if (displayText) {
@@ -1450,9 +1295,7 @@ DASHBOARD_HTML = r'''
                 html += '<div class="post-meta">';
                 html += '<span class="post-time">' + (post.time || 'N/A') + '</span>';
                 html += '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
-                html += '<button class="btn-download ' + (isDownloaded ? 'downloaded' : '') + '" data-post-id="' + post.id + '" onclick="downloadPost(\'' + post.id + '\')" ' + (isDownloaded ? 'disabled' : '') + '>';
-                html += isDownloaded ? '✅ Downloaded' : '⬇️ Download';
-                html += '</button>';
+                html += '<button class="btn-download" data-post-id="' + post.id + '" onclick="downloadPostAsJpg(\'' + post.id + '\')">🖼️ Download JPG</button>';
                 html += '<button class="btn-action post-now" onclick="loadPostForPostNow(\'' + post.id + '\')">📤 Post Now</button>';
                 html += '<button class="btn-action schedule" onclick="loadPostForSchedule(\'' + post.id + '\')">📅 Schedule</button>';
                 html += '</div>';
@@ -1461,10 +1304,11 @@ DASHBOARD_HTML = r'''
             
             grid.innerHTML = html;
             document.getElementById('postCountFooter').textContent = filtered.length;
-            updateDownloadButtons();
         }
         
-        // Update stats
+        // ============================================================
+        // UPDATE STATS
+        // ============================================================
         function updateStats(posts) {
             if (!posts || posts.length === 0) {
                 ['totalPosts','totalImages','totalQuotes','totalSources'].forEach(function(id) {
@@ -1489,7 +1333,9 @@ DASHBOARD_HTML = r'''
             document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
         }
         
-        // Update filters
+        // ============================================================
+        // UPDATE FILTERS
+        // ============================================================
         function updateFilters(posts) {
             if (!posts) posts = allPosts;
             const images = posts.filter(function(p) { return p.images && p.images.length > 0; });
@@ -1500,9 +1346,8 @@ DASHBOARD_HTML = r'''
         }
         
         // ============================================================
-        // POST NOW FUNCTIONS
+        // LOAD PROFILE ID
         // ============================================================
-        
         async function loadProfileId() {
             try {
                 const response = await fetch('/api/config/facebook-profile-id');
@@ -1517,6 +1362,9 @@ DASHBOARD_HTML = r'''
             }
         }
         
+        // ============================================================
+        // LOAD POST FOR POST NOW
+        // ============================================================
         function loadPostForPostNow(postId) {
             const post = allPosts.find(function(p) { return p.id === postId; });
             if (!post) { showToast('❌ Post not found', 'error'); return; }
@@ -1527,6 +1375,7 @@ DASHBOARD_HTML = r'''
             document.getElementById('tab-post').classList.add('active');
             
             document.getElementById('postContent').value = post.text || '';
+            document.getElementById('postForm').dataset.postId = postId;
             
             if (post.images && post.images.length > 0) {
                 document.getElementById('postMedia').value = post.images[0];
@@ -1539,6 +1388,9 @@ DASHBOARD_HTML = r'''
             loadProfileId();
         }
         
+        // ============================================================
+        // LOAD POST FOR SCHEDULE
+        // ============================================================
         function loadPostForSchedule(postId) {
             const post = allPosts.find(function(p) { return p.id === postId; });
             if (!post) { showToast('❌ Post not found', 'error'); return; }
@@ -1549,6 +1401,7 @@ DASHBOARD_HTML = r'''
             document.getElementById('tab-schedule').classList.add('active');
             
             document.getElementById('scheduleContent').value = post.text || '';
+            document.getElementById('scheduleForm').dataset.postId = postId;
             
             if (post.images && post.images.length > 0) {
                 document.getElementById('scheduleMedia').value = post.images[0];
@@ -1558,7 +1411,6 @@ DASHBOARD_HTML = r'''
                 showToast('📝 Loaded (no images)', 'info');
             }
             
-            // Set default time to 2 hours from now
             const defaultTime = new Date();
             defaultTime.setHours(defaultTime.getHours() + 2);
             defaultTime.setMinutes(0, 0, 0);
@@ -1568,11 +1420,15 @@ DASHBOARD_HTML = r'''
             loadProfileId();
         }
         
+        // ============================================================
+        // SUBMIT POST NOW - WITH REMOVE FROM FEED
+        // ============================================================
         async function submitPostNow(e) {
             e.preventDefault();
             
             const content = document.getElementById('postContent').value;
             const mediaUrl = document.getElementById('postMedia').value;
+            const postId = document.getElementById('postForm').dataset.postId || null;
             
             if (!content) { showToast('❌ Please enter post content', 'error'); return; }
             
@@ -1588,7 +1444,8 @@ DASHBOARD_HTML = r'''
                     body: JSON.stringify({
                         content: content,
                         image_url: mediaUrl || null,
-                        image_urls: mediaUrl ? [mediaUrl] : []
+                        image_urls: mediaUrl ? [mediaUrl] : [],
+                        post_id: postId
                     })
                 });
                 
@@ -1596,6 +1453,7 @@ DASHBOARD_HTML = r'''
                 if (data.success) {
                     showToast('✅ Posted to Facebook successfully!', 'success');
                     document.getElementById('postForm').reset();
+                    document.getElementById('postForm').dataset.postId = '';
                     document.getElementById('postResult').innerHTML = `
                         <div style="background:#e8f5e9;border:1px solid #28a745;border-radius:8px;padding:16px;margin-top:16px;">
                             <strong>✅ Posted Successfully!</strong><br>
@@ -1606,6 +1464,14 @@ DASHBOARD_HTML = r'''
                         </div>
                     `;
                     loadHistory();
+                    
+                    // REMOVE POST FROM FEED WITHOUT REFETCHING
+                    allPosts = allPosts.filter(function(p) { return p.id !== postId; });
+                    renderPosts(allPosts);
+                    updateStats(allPosts);
+                    updateFilters(allPosts);
+                    
+                    showToast('✅ Post removed from feed', 'info');
                 } else {
                     throw new Error(data.error || 'Failed to post');
                 }
@@ -1625,15 +1491,15 @@ DASHBOARD_HTML = r'''
         }
         
         // ============================================================
-        // SCHEDULE FUNCTIONS - WITH TIME VALIDATION
+        // SUBMIT SCHEDULE - WITH REMOVE FROM FEED
         // ============================================================
-        
         async function submitSchedule(e) {
             e.preventDefault();
             
             const content = document.getElementById('scheduleContent').value;
             const scheduledTime = document.getElementById('scheduleTime').value;
             const mediaUrl = document.getElementById('scheduleMedia').value;
+            const postId = document.getElementById('scheduleForm').dataset.postId || null;
             
             if (!content) { 
                 showToast('❌ Please enter post content', 'error'); 
@@ -1644,9 +1510,6 @@ DASHBOARD_HTML = r'''
                 return; 
             }
             
-            // ============================================================
-            // VALIDATE TIME - MUST BE 5+ MINUTES IN FUTURE
-            // ============================================================
             const validation = validateScheduleTime(scheduledTime);
             if (!validation.valid) {
                 showToast(validation.message, 'error', 5000);
@@ -1663,7 +1526,6 @@ DASHBOARD_HTML = r'''
                 submitBtn.disabled = true;
                 submitBtn.innerHTML = '⏳ Scheduling...';
                 
-                // Convert local time to UTC ISO format
                 const localDate = new Date(scheduledTime);
                 const utcDate = new Date(localDate.getTime() - (localDate.getTimezoneOffset() * 60000));
                 const scheduledIso = utcDate.toISOString();
@@ -1674,7 +1536,8 @@ DASHBOARD_HTML = r'''
                     body: JSON.stringify({
                         content: content,
                         scheduled_time: scheduledIso,
-                        image_urls: mediaUrl ? [mediaUrl] : []
+                        image_urls: mediaUrl ? [mediaUrl] : [],
+                        post_id: postId
                     })
                 });
                 
@@ -1682,6 +1545,7 @@ DASHBOARD_HTML = r'''
                 if (data.success) {
                     showToast(`✅ Scheduled for ${new Date(scheduledTime).toLocaleString()}`, 'success');
                     document.getElementById('scheduleForm').reset();
+                    document.getElementById('scheduleForm').dataset.postId = '';
                     document.getElementById('scheduleResult').innerHTML = `
                         <div style="background:#e8f5e9;border:1px solid #28a745;border-radius:8px;padding:16px;margin-top:16px;">
                             <strong>✅ Scheduled Successfully!</strong><br>
@@ -1692,8 +1556,15 @@ DASHBOARD_HTML = r'''
                         </div>
                     `;
                     loadHistory();
+                    
+                    // REMOVE POST FROM FEED WITHOUT REFETCHING
+                    allPosts = allPosts.filter(function(p) { return p.id !== postId; });
+                    renderPosts(allPosts);
+                    updateStats(allPosts);
+                    updateFilters(allPosts);
+                    
+                    showToast('✅ Post removed from feed', 'info');
                 } else {
-                    // Check if it's a duplicate error
                     if (data.error && (data.error.includes('409') || data.error.includes('already scheduled'))) {
                         showToast('⚠️ This content was already scheduled recently. Please use different content.', 'warning', 5000);
                     } else {
@@ -1716,9 +1587,8 @@ DASHBOARD_HTML = r'''
         }
         
         // ============================================================
-        // HISTORY FUNCTIONS
+        // LOAD HISTORY
         // ============================================================
-        
         async function loadHistory() {
             try {
                 const response = await fetch('/api/history');
@@ -1748,29 +1618,7 @@ DASHBOARD_HTML = r'''
         // ============================================================
         // INITIALIZATION
         // ============================================================
-        
-        async function loadFromCacheOnStart() {
-            try {
-                const response = await fetch('/api/cache');
-                const data = await response.json();
-                if (data.success && data.posts.length > 0) {
-                    allPosts = data.posts;
-                    renderPosts(allPosts);
-                    updateStats(allPosts);
-                    updateFilters(allPosts);
-                    document.getElementById('cacheBadge').textContent = 'Cached';
-                    document.getElementById('cacheBadge').style.background = '#28a745';
-                    document.getElementById('cacheBadge').style.color = 'white';
-                } else {
-                    document.getElementById('cacheBadge').textContent = 'Ready';
-                    document.getElementById('cacheBadge').style.background = '#e9ecef';
-                    document.getElementById('cacheBadge').style.color = '#495057';
-                }
-            } catch (e) {}
-        }
-        
         document.addEventListener('DOMContentLoaded', function() {
-            loadDownloadedState();
             loadFromCacheOnStart();
             loadHistory();
             loadProfileId();
@@ -1814,10 +1662,23 @@ def get_posts():
         logger.info(f"Fetching {limit} posts per source...")
         posts = fetch_facebook_posts(limit)
         save_posts(posts)
+        
+        # Get processed and removed post IDs
+        processed = get_processed_posts()
+        removed = get_removed_posts()
+        
+        # Filter out processed AND removed posts
+        filtered_posts = [p for p in posts if p.get('id') not in processed and p.get('id') not in removed]
+        
+        logger.info(f"📊 Total: {len(posts)} fetched, {len(filtered_posts)} available, {len(processed)} processed, {len(removed)} removed")
+        
         return jsonify({
             'success': True,
-            'count': len(posts),
-            'posts': posts,
+            'count': len(filtered_posts),
+            'posts': filtered_posts,
+            'total_fetched': len(posts),
+            'processed_count': len(processed),
+            'removed_count': len(removed),
             'fetched_at': datetime.now().isoformat()
         })
     except Exception as e:
@@ -1827,10 +1688,13 @@ def get_posts():
 @app.route('/api/cache', methods=['GET'])
 def get_cache():
     posts = load_posts()
+    processed = get_processed_posts()
+    removed = get_removed_posts()
+    filtered_posts = [p for p in posts if p.get('id') not in processed and p.get('id') not in removed]
     return jsonify({
         'success': True,
-        'count': len(posts),
-        'posts': posts,
+        'count': len(filtered_posts),
+        'posts': filtered_posts,
         'from_cache': True
     })
 
@@ -1839,8 +1703,37 @@ def clear_cache():
     try:
         if os.path.exists(POSTS_FILE_FALLBACK):
             os.remove(POSTS_FILE_FALLBACK)
+        clear_processed_posts()
+        clear_removed_posts()
         return jsonify({'success': True, 'message': 'Cache cleared'})
     except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ============================================================
+# REMOVE POST ROUTE - PERSISTENT
+# ============================================================
+
+@app.route('/api/post/remove', methods=['POST'])
+def remove_post():
+    """Manually remove a post from the feed (persistent)"""
+    data = request.json
+    post_id = data.get('post_id')
+    
+    if not post_id:
+        return jsonify({'success': False, 'error': 'Post ID is required'}), 400
+    
+    try:
+        # Mark as removed in Redis
+        mark_post_as_removed(post_id)
+        logger.info(f"🗑️ Post {post_id} removed by user")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Post removed successfully',
+            'post_id': post_id
+        })
+    except Exception as e:
+        logger.error(f"Error removing post: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # ============================================================
@@ -1859,6 +1752,71 @@ def get_facebook_profile_id():
         return jsonify({'success': False, 'error': str(e)}), 400
 
 # ============================================================
+# DOWNLOAD ROUTES
+# ============================================================
+
+@app.route('/api/download/jpg', methods=['POST'])
+def download_post_jpg():
+    try:
+        data = request.json
+        text = data.get('text', 'No content')
+        source = data.get('source', 'Unknown')
+        
+        img_bytes = create_post_image(text, source)
+        if img_bytes:
+            return send_file(
+                img_bytes,
+                mimetype='image/jpeg',
+                as_attachment=True,
+                download_name=f'post_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg'
+            )
+        else:
+            return jsonify({'success': False, 'error': 'Failed to generate image'}), 500
+    except Exception as e:
+        logger.error(f"Error generating JPG: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/download/single-image', methods=['POST'])
+def download_single_image():
+    try:
+        data = request.json
+        image_url = data.get('image_url')
+        filename = data.get('filename', 'image')
+        
+        if not image_url:
+            return jsonify({"success": False, "error": "No image URL provided"}), 400
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+            'Referer': 'https://www.facebook.com/',
+        }
+        
+        response = requests.get(image_url, headers=headers, timeout=30)
+        
+        if response.status_code != 200:
+            return jsonify({"success": False, "error": "Failed to download image"}), 500
+        
+        content_type = response.headers.get('content-type', 'image/jpeg')
+        ext = 'jpg'
+        if 'png' in content_type:
+            ext = 'png'
+        elif 'gif' in content_type:
+            ext = 'gif'
+        elif 'webp' in content_type:
+            ext = 'webp'
+        
+        return send_file(
+            io.BytesIO(response.content),
+            mimetype=content_type,
+            as_attachment=True,
+            download_name=f"{filename}.{ext}"
+        )
+    except Exception as e:
+        logger.error(f"Error downloading image: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+# ============================================================
 # POST NOW ROUTE
 # ============================================================
 
@@ -1870,6 +1828,7 @@ def post_to_facebook_now():
         content = data.get('content')
         image_url = data.get('image_url')
         image_urls = data.get('image_urls', [])
+        post_id = data.get('post_id')
         
         if not content:
             return jsonify({'success': False, 'error': 'Content is required'}), 400
@@ -1884,16 +1843,22 @@ def post_to_facebook_now():
             result = facebook_poster.post_text(content)
         
         if result.get('success'):
+            if post_id:
+                mark_post_as_processed(post_id)
+            
             history = load_history()
             history.append({
                 'id': result.get('post_id', 'unknown'),
                 'content': content,
                 'platform': 'facebook',
                 'posted_at': datetime.now().isoformat(),
-                'url': result.get('url', '')
+                'url': result.get('url', ''),
+                'original_post_id': post_id
             })
             save_history(history)
             logger.info(f"✅ Post successful: {result.get('post_id')}")
+        else:
+            logger.error(f"❌ Post failed: {result.get('error')}")
         
         return jsonify(result)
         
@@ -1902,7 +1867,7 @@ def post_to_facebook_now():
         return jsonify({'success': False, 'error': str(e)}), 400
 
 # ============================================================
-# SCHEDULE ROUTE - UPDATED
+# SCHEDULE ROUTE
 # ============================================================
 
 @app.route('/api/post/schedule', methods=['POST'])
@@ -1913,6 +1878,7 @@ def schedule_facebook_post():
         content = data.get('content')
         scheduled_time = data.get('scheduled_time')
         image_urls = data.get('image_urls', [])
+        post_id = data.get('post_id')
         
         if not content:
             return jsonify({'success': False, 'error': 'Content is required'}), 400
@@ -1920,8 +1886,6 @@ def schedule_facebook_post():
         if not scheduled_time:
             return jsonify({'success': False, 'error': 'Scheduled time is required'}), 400
         
-        # Clean the time - remove timezone info if present
-        # Zernio expects local time without timezone, with timezone parameter
         if 'Z' in scheduled_time:
             scheduled_time = scheduled_time.replace('Z', '')
         if '+' in scheduled_time:
@@ -1934,12 +1898,13 @@ def schedule_facebook_post():
                 pass
         
         logger.info(f"📅 Schedule: {content[:50]}... at {scheduled_time}")
-        if image_urls:
-            logger.info(f"🖼️ With {len(image_urls)} image(s)")
         
         result = facebook_poster.schedule_post(content, scheduled_time, image_urls)
         
         if result.get('success'):
+            if post_id:
+                mark_post_as_processed(post_id)
+            
             history = load_history()
             history.append({
                 'id': result.get('post_id', 'scheduled'),
@@ -1948,52 +1913,19 @@ def schedule_facebook_post():
                 'scheduled_for': scheduled_time,
                 'status': result.get('status', 'scheduled'),
                 'url': result.get('url', ''),
-                'type': 'scheduled'
+                'type': 'scheduled',
+                'original_post_id': post_id
             })
             save_history(history)
             logger.info(f"✅ Post scheduled: {result.get('post_id')}")
         else:
-            # Log the error
             logger.error(f"❌ Schedule failed: {result.get('error')}")
         
         return jsonify(result)
         
     except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Error scheduling: {error_msg}")
-        return jsonify({'success': False, 'error': error_msg}), 400
-
-# ============================================================
-# HEALTH CHECK ROUTE
-# ============================================================
-
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    """Check system health including Redis connection"""
-    status = {
-        'status': 'healthy',
-        'timestamp': datetime.now().isoformat(),
-        'redis': {
-            'available': REDIS_AVAILABLE,
-            'connected': False
-        },
-        'storage': {
-            'type': 'redis' if REDIS_AVAILABLE else 'file',
-            'directory': DATA_DIR
-        },
-        'timezone': TIMEZONE
-    }
-    
-    # Test Redis connection
-    if REDIS_AVAILABLE and redis:
-        try:
-            redis.ping()
-            status['redis']['connected'] = True
-        except Exception as e:
-            status['redis']['connected'] = False
-            status['redis']['error'] = str(e)
-    
-    return jsonify(status)
+        logger.error(f"Error scheduling: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 400
 
 # ============================================================
 # HISTORY ROUTE
@@ -2012,6 +1944,39 @@ def get_history():
         return jsonify({'success': False, 'error': str(e)}), 400
 
 # ============================================================
+# HEALTH CHECK
+# ============================================================
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    processed = get_processed_posts()
+    removed = get_removed_posts()
+    status = {
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat(),
+        'redis': {
+            'available': REDIS_AVAILABLE,
+            'connected': REDIS_AVAILABLE
+        },
+        'storage': {
+            'type': 'redis' if REDIS_AVAILABLE else 'file',
+            'directory': DATA_DIR
+        },
+        'timezone': TIMEZONE,
+        'processed_count': len(processed),
+        'removed_count': len(removed)
+    }
+    
+    if REDIS_AVAILABLE and redis:
+        try:
+            redis.ping()
+            status['redis']['connected'] = True
+        except:
+            status['redis']['connected'] = False
+    
+    return jsonify(status)
+
+# ============================================================
 # RUN SERVER
 # ============================================================
 
@@ -2019,7 +1984,6 @@ if __name__ == '__main__':
     logger.info("🚀 Starting Social Feed Dashboard - Complete")
     logger.info("📱 Open http://localhost:5000")
     logger.info(f"🌍 Timezone: {TIMEZONE} (GMT+3)")
-    logger.info(f"⏰ Min schedule: {MIN_SCHEDULE_MINUTES} minutes ahead")
-    logger.info("📘 Facebook Profile ID: {}".format(FACEBOOK_PROFILE_ID))
+    logger.info(f"📘 Facebook Profile ID: {FACEBOOK_PROFILE_ID}")
     logger.info(f"💾 Storage: {'Redis' if REDIS_AVAILABLE else 'File (fallback)'}")
     app.run(debug=True, host='0.0.0.0', port=5000)
