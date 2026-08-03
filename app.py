@@ -1,0 +1,1804 @@
+# ============================================================
+# SOCIAL FEED DASHBOARD - POST NOW & SCHEDULE (COMPLETE)
+# ============================================================
+
+from flask import Flask, jsonify, request, render_template_string
+from flask_cors import CORS
+from fetcher import fetch_facebook_posts
+from datetime import datetime, timedelta
+import json
+import os
+import logging
+import requests
+from io import BytesIO
+import pytz
+from zernio import Zernio
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+CORS(app)
+
+# ============================================================
+# IMPORT CONFIG
+# ============================================================
+
+from config import ZERNIO_API_KEY, FACEBOOK_PROFILE_ID
+
+# ============================================================
+# CONSTANTS
+# ============================================================
+
+TIMEZONE = "Africa/Nairobi"  # GMT+3
+MIN_SCHEDULE_MINUTES = 5     # Minimum minutes ahead for scheduling
+
+# ============================================================
+# PERSISTENT STORAGE
+# ============================================================
+
+POSTS_FILE = 'posts_cache.json'
+HISTORY_FILE = 'post_history.json'
+
+def save_posts(posts):
+    with open(POSTS_FILE, 'w', encoding='utf-8') as f:
+        json.dump({
+            'posts': posts,
+            'last_updated': datetime.now().isoformat(),
+            'count': len(posts)
+        }, f, ensure_ascii=False, indent=2)
+    return True
+
+def load_posts():
+    try:
+        if os.path.exists(POSTS_FILE):
+            with open(POSTS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get('posts', [])
+    except:
+        pass
+    return []
+
+def save_history(history):
+    with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
+    return True
+
+def load_history():
+    try:
+        if os.path.exists(HISTORY_FILE):
+            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except:
+        pass
+    return []
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ============================================================
+# FACEBOOK POSTER CLASS - SIMPLIFIED (NO MANUAL UPLOAD)
+# ============================================================
+
+os.environ['PYTHONHTTPSVERIFY'] = '0'
+
+class FacebookPoster:
+    def __init__(self):
+        self.api_key = ZERNIO_API_KEY
+        self.base_url = "https://zernio.com/api/v1"
+        self.page_id = FACEBOOK_PROFILE_ID
+        self.timezone = TIMEZONE
+        self.min_schedule_minutes = MIN_SCHEDULE_MINUTES
+        self.headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        self.client = Zernio(api_key=self.api_key)
+        logger.info(f"📘 Facebook Poster initialized with Profile ID: {self.page_id}")
+        logger.info(f"🌍 Timezone: {self.timezone}")
+        logger.info(f"⏰ Min schedule: {self.min_schedule_minutes} minutes ahead")
+    
+    def _extract_post_data(self, post_response):
+        """Extract post ID and URL from Zernio response"""
+        try:
+            post_id = None
+            post_url = None
+            
+            # Try SDK response format (has 'post' attribute)
+            if hasattr(post_response, 'post'):
+                post_obj = post_response.post
+                if hasattr(post_obj, 'field_id'):
+                    post_id = post_obj.field_id
+                elif hasattr(post_obj, 'id'):
+                    post_id = post_obj.id
+                elif hasattr(post_obj, '_id'):
+                    post_id = post_obj._id
+                
+                if hasattr(post_obj, 'platforms') and len(post_obj.platforms) > 0:
+                    platform = post_obj.platforms[0]
+                    if hasattr(platform, 'platformPostUrl'):
+                        post_url = str(platform.platformPostUrl)
+            
+            # Try dict response
+            elif isinstance(post_response, dict):
+                # Check for data.post format
+                if 'data' in post_response and 'post' in post_response['data']:
+                    post_data = post_response['data']['post']
+                    post_id = post_data.get('_id') or post_data.get('id') or post_data.get('field_id')
+                    platforms = post_data.get('platforms', [])
+                    if platforms and len(platforms) > 0:
+                        post_url = platforms[0].get('platformPostUrl')
+                else:
+                    # Direct response
+                    post_id = post_response.get('id') or post_response.get('post_id') or post_response.get('field_id')
+                    post_url = post_response.get('url') or post_response.get('post_url')
+                    
+                    # Check inside 'post' key
+                    if 'post' in post_response and isinstance(post_response['post'], dict):
+                        post_data = post_response['post']
+                        if not post_id:
+                            post_id = post_data.get('id') or post_data.get('field_id') or post_data.get('_id')
+                        if not post_url:
+                            post_url = post_data.get('url') or post_data.get('post_url')
+
+            if not post_url and post_id:
+                post_url = f"https://www.facebook.com/{self.page_id}/posts/{post_id}"
+
+            if not post_id:
+                post_id = "success"
+
+            return post_id, post_url
+        except Exception as e:
+            logger.error(f"Error extracting post data: {e}")
+            return "success", None
+    
+    def _clean_status(self, status):
+        """Clean up status string from enum"""
+        if not status:
+            return "unknown"
+        status_str = str(status)
+        if 'Status11.' in status_str:
+            status_str = status_str.replace('Status11.', '')
+        if 'status11.' in status_str:
+            status_str = status_str.replace('status11.', '')
+        return status_str.lower()
+    
+    # ============================================================
+    # POST NOW METHODS - Using SDK Directly
+    # ============================================================
+    
+    def post_text(self, content):
+        """
+        Post text only to Facebook immediately
+        Matches Node.js postText function
+        """
+        try:
+            logger.info(f"📤 Posting text: {content[:50]}...")
+            
+            # Use SDK directly - matches Node.js format
+            response = self.client.posts.create(
+                content=content,
+                platforms=[
+                    {"platform": "facebook", "accountId": self.page_id}
+                ],
+                publish_now=True
+            )
+            
+            # Extract post details
+            post_id, post_url = self._extract_post_data(response)
+            
+            logger.info(f"✅ Post published! ID: {post_id}")
+            logger.info(f"🔗 URL: {post_url}")
+            
+            return {
+                "success": True,
+                "post_id": post_id,
+                "url": post_url,
+                "message": "Post published successfully"
+            }
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to post: {e}")
+            if hasattr(e, 'response') and e.response:
+                logger.error(f"Response: {e.response.text[:500]}")
+            return {"success": False, "error": str(e)}
+    
+    def post_with_image(self, content, image_url):
+        """
+        Post with an image to Facebook immediately
+        Matches Node.js postWithImage function
+        """
+        try:
+            logger.info(f"📤 Posting with image: {content[:50]}...")
+            logger.info(f"🖼️ Image: {image_url}")
+            
+            # Use SDK directly with mediaItems - matches Node.js format
+            response = self.client.posts.create(
+                content=content,
+                media_items=[
+                    {"url": image_url, "type": "image"}
+                ],
+                platforms=[
+                    {"platform": "facebook", "accountId": self.page_id}
+                ],
+                publish_now=True
+            )
+            
+            # Extract post details
+            post_id, post_url = self._extract_post_data(response)
+            
+            logger.info(f"✅ Post with image published! ID: {post_id}")
+            logger.info(f"🔗 URL: {post_url}")
+            
+            return {
+                "success": True,
+                "post_id": post_id,
+                "url": post_url,
+                "message": "Post with image published successfully"
+            }
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to post with image: {e}")
+            if hasattr(e, 'response') and e.response:
+                logger.error(f"Response: {e.response.text[:500]}")
+            return {"success": False, "error": str(e)}
+    
+    def post_with_images(self, content, image_urls):
+        """
+        Post with multiple images to Facebook immediately
+        Matches Node.js postWithImages function
+        """
+        try:
+            logger.info(f"📤 Posting with {len(image_urls)} images...")
+            logger.info(f"  📝 Content: {content[:50]}...")
+            
+            # Create media items array - matches Node.js format
+            media_items = [
+                {"url": url, "type": "image"}
+                for url in image_urls[:5]  # Max 5 images
+            ]
+            
+            # Use SDK directly with mediaItems
+            response = self.client.posts.create(
+                content=content,
+                media_items=media_items,
+                platforms=[
+                    {"platform": "facebook", "accountId": self.page_id}
+                ],
+                publish_now=True
+            )
+            
+            # Extract post details
+            post_id, post_url = self._extract_post_data(response)
+            
+            logger.info(f"✅ Post with {len(media_items)} images published! ID: {post_id}")
+            logger.info(f"🔗 URL: {post_url}")
+            
+            return {
+                "success": True,
+                "post_id": post_id,
+                "url": post_url,
+                "message": f"Post with {len(media_items)} images published successfully"
+            }
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to post with images: {e}")
+            if hasattr(e, 'response') and e.response:
+                logger.error(f"Response: {e.response.text[:500]}")
+            return {"success": False, "error": str(e)}
+    
+    # ============================================================
+    # SCHEDULE POST METHOD - Using SDK Directly
+    # ============================================================
+    
+    def schedule_post(self, content, scheduled_time_iso, image_urls=None):
+        """
+        Schedule a post for later using the Zernio SDK.
+        
+        IMPORTANT: Use local time WITHOUT timezone suffix + timezone parameter.
+        Example: scheduled_for="2026-08-03T14:30:00", timezone="Africa/Nairobi"
+        """
+        try:
+            logger.info(f"📅 Scheduling post for: {scheduled_time_iso}")
+            logger.info(f"🌍 Timezone: {self.timezone}")
+            
+            # Parse the time to check if it's in the future
+            local_tz = pytz.timezone(self.timezone)
+            try:
+                scheduled_dt = datetime.fromisoformat(scheduled_time_iso)
+                scheduled_dt = local_tz.localize(scheduled_dt)
+                now_dt = datetime.now(local_tz)
+                
+                time_diff = (scheduled_dt - now_dt).total_seconds()
+                
+                min_seconds = self.min_schedule_minutes * 60
+                if time_diff < min_seconds:
+                    error_msg = f"Scheduled time must be at least {self.min_schedule_minutes} minutes in the future. Currently {time_diff/60:.1f} minutes"
+                    logger.error(f"❌ {error_msg}")
+                    return {
+                        "success": False, 
+                        "error": error_msg
+                    }
+                
+                logger.info(f"✅ Time is valid: {time_diff/60:.1f} minutes in the future")
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Could not parse time: {e}")
+                return {
+                    "success": False,
+                    "error": f"Invalid time format: {scheduled_time_iso}"
+                }
+            
+            # Prepare media items - matches Node.js format
+            media_items = None
+            if image_urls:
+                media_items = [
+                    {"url": url, "type": "image"}
+                    for url in image_urls[:5]  # Max 5 images
+                ]
+                logger.info(f"📸 Including {len(media_items)} image(s)")
+            
+            # Create the scheduled post using the SDK
+            try:
+                post_data = {
+                    "content": content,
+                    "platforms": [
+                        {
+                            "platform": "facebook",
+                            "accountId": self.page_id
+                        }
+                    ],
+                    "scheduled_for": scheduled_time_iso,
+                    "timezone": self.timezone
+                }
+                
+                if media_items:
+                    post_data["media_items"] = media_items
+                
+                response = self.client.posts.create(**post_data)
+                
+                # Extract post details
+                post_id = None
+                status = None
+                scheduled_for = None
+                
+                if hasattr(response, 'post'):
+                    post_obj = response.post
+                    if hasattr(post_obj, 'field_id'):
+                        post_id = post_obj.field_id
+                    if hasattr(post_obj, 'status'):
+                        status = self._clean_status(post_obj.status)
+                    if hasattr(post_obj, 'scheduled_for'):
+                        scheduled_for = str(post_obj.scheduled_for)
+                
+                logger.info(f"✅ Post scheduled! ID: {post_id or 'success'} Status: {status}")
+                
+                return {
+                    "success": True,
+                    "post_id": post_id or "scheduled",
+                    "scheduled_for": scheduled_for or scheduled_time_iso,
+                    "status": status,
+                    "has_images": bool(media_items),
+                    "image_count": len(media_items) if media_items else 0,
+                    "message": f"Post scheduled successfully (Status: {status})"
+                }
+                
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(f"❌ Failed to create scheduled post: {error_msg}")
+                if hasattr(e, 'response') and e.response:
+                    logger.error(f"Response: {e.response.text[:500]}")
+                    if '409' in str(e.response.status_code) or 'already scheduled' in e.response.text:
+                        error_msg = "This content was already scheduled recently. Please use different content."
+                return {"success": False, "error": error_msg}
+            
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"❌ Failed to schedule post: {error_msg}")
+            return {"success": False, "error": error_msg}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Create Facebook poster instance
+facebook_poster = FacebookPoster()
+
+# ============================================================
+# HTML DASHBOARD - COMPLETE WITH VALIDATION
+# ============================================================
+
+DASHBOARD_HTML = r'''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Social Feed Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #f0f2f5;
+            color: #1a1a2e;
+            min-height: 100vh;
+        }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #c1c7cd; border-radius: 10px; }
+        
+        .header {
+            background: #ffffff;
+            border-bottom: 1px solid #e9ecef;
+            padding: 16px 32px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        .header-content {
+            max-width: 1400px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+        .header-left { display: flex; align-items: center; gap: 16px; }
+        .logo { display: flex; align-items: center; gap: 10px; }
+        .logo-icon {
+            width: 38px; height: 38px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            color: white;
+        }
+        .logo h1 { font-size: 22px; font-weight: 800; color: #1a1a2e; }
+        .logo h1 span { color: #667eea; }
+        .badge {
+            background: #e9ecef; color: #495057;
+            padding: 2px 12px; border-radius: 20px;
+            font-size: 11px; font-weight: 600;
+        }
+        .badge.live { background: #28a745; color: white; animation: pulse 2s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+        
+        .header-right { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+        .header-stats { display: flex; gap: 24px; }
+        .stat-mini { text-align: center; }
+        .stat-mini .number { font-size: 18px; font-weight: 700; color: #1a1a2e; }
+        .stat-mini .label { font-size: 10px; color: #868e96; text-transform: uppercase; font-weight: 600; }
+        
+        .btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
+        .btn {
+            padding: 9px 20px; border: none; border-radius: 8px;
+            font-weight: 600; font-size: 13px; cursor: pointer;
+            transition: all 0.25s ease;
+            display: flex; align-items: center; gap: 8px;
+            font-family: 'Inter', sans-serif;
+        }
+        .btn-primary { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
+        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(102,126,234,0.4); }
+        .btn-facebook { background: #1877f2; color: white; }
+        .btn-facebook:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(24,119,242,0.3); }
+        .btn-success { background: #28a745; color: white; }
+        .btn-success:hover { transform: translateY(-2px); }
+        .btn-warning { background: #ffc107; color: #1a1a2e; }
+        .btn-warning:hover { transform: translateY(-2px); }
+        .btn-secondary { background: #e9ecef; color: #495057; }
+        .btn-secondary:hover { background: #dee2e6; }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none !important; }
+        
+        .spinner { display: none; animation: spin 0.8s linear infinite; }
+        .btn.loading .spinner { display: inline-block; }
+        .btn.loading .btn-text { display: none; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        
+        .toast-container {
+            position: fixed; top: 80px; right: 24px; z-index: 999;
+            display: flex; flex-direction: column; gap: 10px;
+        }
+        .toast {
+            background: #1a1a2e; color: white; padding: 14px 24px;
+            border-radius: 12px; font-size: 14px; font-weight: 500;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            animation: slideIn 0.4s ease; min-width: 280px;
+            display: flex; align-items: center; gap: 12px;
+        }
+        .toast.success { border-left: 4px solid #28a745; }
+        .toast.error { border-left: 4px solid #dc3545; }
+        .toast.warning { border-left: 4px solid #ffc107; }
+        .toast.info { border-left: 4px solid #667eea; }
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(100px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        .toast .icon { font-size: 20px; }
+        .toast .msg { flex: 1; }
+        .toast .close { cursor: pointer; opacity: 0.5; transition: opacity 0.2s; font-size: 18px; }
+        .toast .close:hover { opacity: 1; }
+        
+        .stats-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 16px; padding: 24px 32px 0; max-width: 1400px; margin: 0 auto;
+        }
+        .stat-card {
+            background: #ffffff; border-radius: 12px; padding: 18px 22px;
+            border: 1px solid #e9ecef; transition: all 0.2s ease;
+        }
+        .stat-card:hover { border-color: #667eea; box-shadow: 0 4px 20px rgba(102,126,234,0.08); }
+        .stat-card .value { font-size: 26px; font-weight: 800; color: #1a1a2e; }
+        .stat-card .label { color: #868e96; font-size: 13px; font-weight: 500; margin-top: 2px; }
+        .stat-card .icon { font-size: 22px; margin-bottom: 4px; }
+        
+        .tabs {
+            display: flex; gap: 4px; background: #ffffff; padding: 4px;
+            border-radius: 12px; border: 1px solid #e9ecef;
+            margin: 16px 32px 0; max-width: 1400px;
+        }
+        .tab-btn {
+            padding: 10px 24px; border: none; border-radius: 8px;
+            background: transparent; color: #868e96;
+            font-weight: 600; font-size: 14px; cursor: pointer;
+            transition: all 0.2s ease; font-family: 'Inter', sans-serif;
+            flex: 1;
+        }
+        .tab-btn:hover { background: #f1f3f5; color: #1a1a2e; }
+        .tab-btn.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white; box-shadow: 0 4px 15px rgba(102,126,234,0.3);
+        }
+        .tab-content { display: none; padding: 20px 32px; max-width: 1400px; margin: 0 auto; }
+        .tab-content.active { display: block; }
+        
+        .filters {
+            display: flex; gap: 8px; flex-wrap: wrap;
+            background: #ffffff; padding: 8px; border-radius: 12px;
+            border: 1px solid #e9ecef; margin-bottom: 20px;
+        }
+        .filter-btn {
+            padding: 8px 18px; border: none; border-radius: 8px;
+            background: transparent; color: #868e96;
+            font-weight: 600; font-size: 13px; cursor: pointer;
+            transition: all 0.2s ease; font-family: 'Inter', sans-serif;
+        }
+        .filter-btn:hover { background: #f1f3f5; color: #1a1a2e; }
+        .filter-btn.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white; box-shadow: 0 4px 15px rgba(102,126,234,0.3);
+        }
+        .filter-btn .count {
+            background: rgba(255,255,255,0.2);
+            padding: 1px 8px; border-radius: 10px; font-size: 11px; margin-left: 4px;
+        }
+        .filter-btn.active .count { background: rgba(255,255,255,0.2); }
+        
+        .posts-grid {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+            gap: 24px;
+        }
+        .post-card {
+            background: #ffffff; border-radius: 16px; overflow: hidden;
+            border: 1px solid #e9ecef; transition: all 0.3s cubic-bezier(0.25,0.46,0.45,0.94);
+            animation: fadeInUp 0.5s ease forwards; opacity: 0;
+        }
+        .post-card:hover { transform: translateY(-4px); box-shadow: 0 12px 40px rgba(0,0,0,0.08); border-color: #667eea; }
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(16px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .post-card:nth-child(1) { animation-delay: 0.03s; }
+        .post-card:nth-child(2) { animation-delay: 0.06s; }
+        .post-card:nth-child(3) { animation-delay: 0.09s; }
+        .post-card:nth-child(4) { animation-delay: 0.12s; }
+        .post-card:nth-child(5) { animation-delay: 0.15s; }
+        .post-card:nth-child(6) { animation-delay: 0.18s; }
+        .post-card:nth-child(7) { animation-delay: 0.21s; }
+        .post-card:nth-child(8) { animation-delay: 0.24s; }
+        .post-card:nth-child(9) { animation-delay: 0.27s; }
+        
+        .post-image-wrap {
+            position: relative; width: 100%; padding-top: 56.25%;
+            background: #f8f9fa; overflow: hidden;
+        }
+        .post-image-wrap img {
+            position: absolute; top: 0; left: 0;
+            width: 100%; height: 100%; object-fit: cover;
+            transition: transform 0.5s ease;
+        }
+        .post-card:hover .post-image-wrap img { transform: scale(1.02); }
+        .post-image-wrap .no-image {
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%); font-size: 40px; opacity: 0.2;
+        }
+        .post-source-tag {
+            position: absolute; top: 12px; left: 12px;
+            background: rgba(0,0,0,0.75); backdrop-filter: blur(10px);
+            padding: 4px 14px; border-radius: 20px;
+            font-size: 11px; font-weight: 600; color: #667eea;
+            border: 1px solid rgba(102,126,234,0.2);
+        }
+        .post-content { padding: 18px 20px 16px; }
+        .post-text {
+            font-size: 14px; line-height: 1.7; color: #2d3436;
+            margin-bottom: 14px;
+            display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden;
+        }
+        .post-text.quoted { border-left: 3px solid #667eea; padding-left: 14px; font-style: italic; color: #636e72; }
+        .post-text .hashtag { color: #667eea; font-weight: 500; }
+        .post-meta {
+            display: flex; justify-content: space-between; align-items: center;
+            flex-wrap: wrap; gap: 10px; padding-top: 14px;
+            border-top: 1px solid #f1f3f5;
+        }
+        .post-time { font-size: 12px; color: #adb5bd; }
+        
+        .btn-download {
+            background: #28a745; color: white; border: none; padding: 6px 16px;
+            border-radius: 8px; font-size: 12px; font-weight: 600;
+            cursor: pointer; transition: all 0.25s ease;
+            display: flex; align-items: center; gap: 6px;
+            font-family: 'Inter', sans-serif;
+        }
+        .btn-download:hover { transform: translateY(-2px); box-shadow: 0 4px 15px rgba(40,167,69,0.3); }
+        .btn-download.downloaded { background: #6c757d; cursor: default; }
+        .btn-download.downloaded:hover { transform: none; box-shadow: none; }
+        
+        .btn-action {
+            background: #667eea; color: white; border: none; padding: 6px 16px;
+            border-radius: 8px; font-size: 12px; font-weight: 600;
+            cursor: pointer; transition: all 0.25s ease;
+            font-family: 'Inter', sans-serif;
+        }
+        .btn-action:hover { transform: translateY(-2px); box-shadow: 0 4px 15px rgba(102,126,234,0.3); }
+        .btn-action.post-now { background: #1877f2; }
+        .btn-action.post-now:hover { box-shadow: 0 4px 15px rgba(24,119,242,0.3); }
+        .btn-action.schedule { background: #ffc107; color: #1a1a2e; }
+        .btn-action.schedule:hover { box-shadow: 0 4px 15px rgba(255,193,7,0.3); }
+        
+        .loading-state {
+            grid-column: 1/-1; text-align: center; padding: 60px 20px;
+        }
+        .loading-state .loader {
+            width: 40px; height: 40px;
+            border: 3px solid #f1f3f5; border-top-color: #667eea;
+            border-radius: 50%; animation: spin 0.8s linear infinite;
+            margin: 0 auto 16px;
+        }
+        
+        .empty-state {
+            grid-column: 1/-1; text-align: center; padding: 80px 20px;
+        }
+        .empty-state .icon { font-size: 72px; margin-bottom: 16px; opacity: 0.3; }
+        .empty-state h3 { color: #868e96; font-weight: 500; font-size: 22px; margin-bottom: 8px; }
+        .empty-state p { color: #adb5bd; font-size: 15px; }
+        
+        .schedule-form {
+            background: #ffffff; border-radius: 16px; padding: 24px;
+            border: 1px solid #e9ecef; margin-bottom: 24px;
+        }
+        .schedule-form h2 { margin-bottom: 20px; font-size: 24px; }
+        .schedule-form .subtitle { color: #868e96; font-size: 14px; margin-bottom: 20px; }
+        .form-group { margin-bottom: 16px; }
+        .form-group label {
+            display: block; font-weight: 600; margin-bottom: 6px;
+            font-size: 14px; color: #495057;
+        }
+        .form-group input, .form-group textarea, .form-group select {
+            width: 100%; padding: 10px 12px;
+            border: 1px solid #e9ecef; border-radius: 8px;
+            font-family: 'Inter', sans-serif; font-size: 14px;
+            transition: border-color 0.2s;
+        }
+        .form-group input:focus, .form-group textarea:focus, .form-group select:focus {
+            outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(102,126,234,0.1);
+        }
+        .form-group textarea { resize: vertical; min-height: 100px; }
+        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        .form-actions { display: flex; gap: 12px; margin-top: 20px; }
+        .form-actions .btn { flex: 1; justify-content: center; }
+        
+        .info-box {
+            background: #f0f7ff; border: 1px solid #1877f2; border-radius: 8px;
+            padding: 12px 16px; margin-bottom: 16px;
+            display: flex; justify-content: space-between; align-items: center;
+            flex-wrap: wrap; gap: 10px;
+        }
+        .info-box .label { font-size: 13px; color: #495057; }
+        .info-box .value { font-weight: 600; color: #1877f2; }
+        
+        .queue-item {
+            background: #ffffff; padding: 16px 20px;
+            border-radius: 12px; border: 1px solid #e9ecef;
+            margin-bottom: 12px;
+            display: flex; justify-content: space-between; align-items: center;
+            flex-wrap: wrap; gap: 12px;
+        }
+        .queue-item:hover { border-color: #667eea; }
+        .queue-item .info { flex: 1; min-width: 200px; }
+        .queue-item .info .title { font-weight: 600; }
+        .queue-item .info .details { font-size: 13px; color: #868e96; margin-top: 4px; }
+        .queue-item .badge-facebook { background: #1877f2; color: white; padding: 2px 10px; border-radius: 12px; font-size: 11px; }
+        .queue-item .badge-scheduled { background: #ffc107; color: #1a1a2e; padding: 2px 10px; border-radius: 12px; font-size: 11px; }
+        .queue-item .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+        
+        .footer {
+            text-align: center; padding: 20px 32px;
+            color: #adb5bd; font-size: 13px;
+            border-top: 1px solid #e9ecef; background: #ffffff;
+        }
+        .footer span { color: #667eea; }
+        
+        @media (max-width: 768px) {
+            .header { padding: 12px 16px; }
+            .header-content { flex-direction: column; align-items: stretch; }
+            .header-left { justify-content: space-between; }
+            .logo h1 { font-size: 18px; }
+            .header-right { flex-direction: column; align-items: stretch; gap: 12px; }
+            .header-stats { justify-content: space-around; }
+            .stats-grid { grid-template-columns: repeat(2, 1fr); padding: 16px; }
+            .tabs { flex-direction: column; margin: 12px 16px; }
+            .tab-content { padding: 12px 16px; }
+            .posts-grid { grid-template-columns: 1fr; }
+            .form-row { grid-template-columns: 1fr; }
+            .queue-item { flex-direction: column; align-items: stretch; }
+            .queue-item .actions { justify-content: stretch; }
+            .queue-item .actions .btn { flex: 1; justify-content: center; }
+            .toast-container { top: 70px; right: 12px; left: 12px; }
+            .toast { min-width: auto; font-size: 13px; padding: 12px 16px; }
+            .info-box { flex-direction: column; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="toast-container" id="toastContainer"></div>
+    
+    <header class="header">
+        <div class="header-content">
+            <div class="header-left">
+                <div class="logo">
+                    <div class="logo-icon">📊</div>
+                    <h1>Social<span>Feed</span></h1>
+                </div>
+                <span class="badge live">● LIVE</span>
+                <span class="badge" id="cacheBadge">Loading...</span>
+            </div>
+            <div class="header-right">
+                <div class="header-stats">
+                    <div class="stat-mini">
+                        <div class="number" id="postCount">0</div>
+                        <div class="label">Posts</div>
+                    </div>
+                    <div class="stat-mini">
+                        <div class="number" id="sourceCount">0</div>
+                        <div class="label">Sources</div>
+                    </div>
+                    <div class="stat-mini">
+                        <div class="number" id="lastUpdate">-</div>
+                        <div class="label">Updated</div>
+                    </div>
+                </div>
+                <div class="btn-group">
+                    <button class="btn btn-secondary" onclick="clearCache()">🗑️ Clear</button>
+                    <button class="btn btn-primary" id="refreshBtn" onclick="fetchPosts()">
+                        <span class="spinner">⟳</span>
+                        <span class="btn-text">🔄 Fetch Posts</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+    
+    <div class="stats-grid" id="statsGrid">
+        <div class="stat-card">
+            <div class="icon">📝</div>
+            <div class="value" id="totalPosts">0</div>
+            <div class="label">Total Posts</div>
+        </div>
+        <div class="stat-card">
+            <div class="icon">📸</div>
+            <div class="value" id="totalImages">0</div>
+            <div class="label">With Images</div>
+        </div>
+        <div class="stat-card">
+            <div class="icon">💬</div>
+            <div class="value" id="totalQuotes">0</div>
+            <div class="label">Quotes</div>
+        </div>
+        <div class="stat-card">
+            <div class="icon">📋</div>
+            <div class="value" id="totalSources">0</div>
+            <div class="label">Sources</div>
+        </div>
+    </div>
+    
+    <div class="tabs">
+        <button class="tab-btn active" data-tab="feed">📱 Feed</button>
+        <button class="tab-btn" data-tab="post">📤 Post Now</button>
+        <button class="tab-btn" data-tab="schedule">📅 Schedule</button>
+        <button class="tab-btn" data-tab="history">✅ History</button>
+    </div>
+    
+    <!-- FEED TAB -->
+    <div class="tab-content active" id="tab-feed">
+        <div class="filters" id="filters">
+            <button class="filter-btn active" data-filter="all">📋 All <span class="count" id="countAll">0</span></button>
+            <button class="filter-btn" data-filter="images">🖼️ Images <span class="count" id="countImages">0</span></button>
+            <button class="filter-btn" data-filter="quotes">💬 Quotes <span class="count" id="countQuotes">0</span></button>
+        </div>
+        <div class="posts-grid" id="postsGrid">
+            <div class="empty-state">
+                <div class="icon">📭</div>
+                <h3>No Posts Loaded</h3>
+                <p>Click the "Fetch Posts" button above to load content</p>
+                <button class="btn btn-primary" onclick="fetchPosts()" style="margin-top:20px;padding:12px 32px;font-size:16px;">🚀 Fetch Posts Now</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- POST NOW TAB -->
+    <div class="tab-content" id="tab-post">
+        <div class="schedule-form">
+            <h2>📤 Post to Facebook Now</h2>
+            <p class="subtitle">Post immediately to your Facebook page</p>
+            
+            <div class="info-box">
+                <span class="label">📘 Posting to: <strong style="color:#1877f2;">Facebook Page</strong></span>
+                <span class="label">🆔 Profile ID: <strong style="color:#1877f2;" id="profileDisplay">Loading...</strong></span>
+            </div>
+            
+            <form id="postForm" onsubmit="submitPostNow(event)">
+                <div class="form-group">
+                    <label>Post Content</label>
+                    <textarea id="postContent" placeholder="Write your Facebook post here..." required></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Image URL (Optional)</label>
+                    <input type="text" id="postMedia" placeholder="https://example.com/image.jpg">
+                    <small style="color:#868e96;">Add one image URL or leave blank for text-only post</small>
+                </div>
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-facebook">
+                        🚀 Post Now
+                    </button>
+                    <button type="reset" class="btn btn-secondary">Clear</button>
+                </div>
+            </form>
+        </div>
+        <div id="postResult"></div>
+    </div>
+    
+    <!-- SCHEDULE TAB -->
+    <div class="tab-content" id="tab-schedule">
+        <div class="schedule-form">
+            <h2>📅 Schedule Post to Facebook</h2>
+            <p class="subtitle">Schedule a post for a specific time</p>
+            
+            <div class="info-box">
+                <span class="label">📘 Posting to: <strong style="color:#1877f2;">Facebook Page</strong></span>
+                <span class="label">🆔 Profile ID: <strong style="color:#1877f2;" id="scheduleProfileDisplay">Loading...</strong></span>
+            </div>
+            
+            <form id="scheduleForm" onsubmit="submitSchedule(event)">
+                <div class="form-group">
+                    <label>Post Content</label>
+                    <textarea id="scheduleContent" placeholder="Write your Facebook post here..." required></textarea>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Scheduled Date & Time</label>
+                        <input type="datetime-local" id="scheduleTime" required>
+                        <small style="color:#868e96;" id="timeHint">
+                            ⏰ Must be at least 5 minutes from now
+                        </small>
+                    </div>
+                    <div class="form-group">
+                        <label>Image URL (Optional)</label>
+                        <input type="text" id="scheduleMedia" placeholder="https://example.com/image.jpg">
+                    </div>
+                </div>
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-warning">
+                        📅 Schedule Post
+                    </button>
+                    <button type="reset" class="btn btn-secondary">Clear</button>
+                </div>
+            </form>
+        </div>
+        <div id="scheduleResult"></div>
+    </div>
+    
+    <!-- HISTORY TAB -->
+    <div class="tab-content" id="tab-history">
+        <h2 style="margin-bottom:16px;">✅ Posted History</h2>
+        <div id="historyList"><p style="color:#868e96;">Loading history...</p></div>
+    </div>
+    
+    <div class="footer">
+        Built with <span>❤️</span> • <span id="postCountFooter">0</span> posts loaded • Facebook via Zernio
+    </div>
+    
+    <script>
+        let allPosts = [];
+        let currentFilter = 'all';
+        let isLoading = false;
+        let downloadedPosts = new Set();
+        let profileId = '';
+        
+        // Load downloaded state
+        function loadDownloadedState() {
+            try {
+                const saved = localStorage.getItem('downloadedPosts');
+                if (saved) downloadedPosts = new Set(JSON.parse(saved));
+            } catch (e) {}
+        }
+        function saveDownloadedState() {
+            try {
+                localStorage.setItem('downloadedPosts', JSON.stringify([...downloadedPosts]));
+            } catch (e) {}
+        }
+        
+        // Toast notifications
+        function showToast(message, type, duration) {
+            type = type || 'info';
+            duration = duration || 4000;
+            const container = document.getElementById('toastContainer');
+            const icons = { success: '✅', error: '❌', warning: '⚠️', info: 'ℹ️' };
+            
+            const toast = document.createElement('div');
+            toast.className = 'toast ' + type;
+            toast.innerHTML = '<span class="icon">' + (icons[type] || 'ℹ️') + '</span>' +
+                '<span class="msg">' + message + '</span>' +
+                '<span class="close" onclick="this.parentElement.remove()">✕</span>';
+            
+            container.appendChild(toast);
+            setTimeout(function() {
+                if (toast.parentElement) {
+                    toast.style.opacity = '0';
+                    toast.style.transform = 'translateX(100px)';
+                    setTimeout(function() { toast.remove(); }, 300);
+                }
+            }, duration);
+        }
+        
+        // ============================================================
+        // TIME VALIDATION - Must be 5+ minutes in future
+        // ============================================================
+        function validateScheduleTime(scheduledTime) {
+            const selectedDate = new Date(scheduledTime);
+            const now = new Date();
+            const minTime = new Date(now.getTime() + 5 * 60000); // 5 minutes from now
+            
+            if (selectedDate < minTime) {
+                const minTimeStr = minTime.toLocaleTimeString();
+                return {
+                    valid: false,
+                    message: `⏰ Scheduled time must be at least 5 minutes from now.\nMinimum time: ${minTimeStr}`
+                };
+            }
+            
+            return { valid: true };
+        }
+        
+        // ============================================================
+        // Update time hint with minimum allowed time
+        // ============================================================
+        function updateTimeHint() {
+            const now = new Date();
+            const minTime = new Date(now.getTime() + 5 * 60000);
+            const minTimeStr = minTime.toLocaleTimeString();
+            const hint = document.getElementById('timeHint');
+            if (hint) {
+                hint.textContent = `⏰ Must be at least 5 minutes from now (minimum: ${minTimeStr})`;
+                hint.style.color = '#6c757d';
+            }
+        }
+        
+        // Tab switching
+        document.querySelectorAll('.tab-btn').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+                this.classList.add('active');
+                const tabName = this.dataset.tab;
+                document.querySelectorAll('.tab-content').forEach(function(tc) { tc.classList.remove('active'); });
+                document.getElementById('tab-' + tabName).classList.add('active');
+                if (tabName === 'post' || tabName === 'schedule') {
+                    loadProfileId();
+                    if (tabName === 'schedule') updateTimeHint();
+                }
+                if (tabName === 'history') loadHistory();
+            });
+        });
+        
+        // Download post
+        function downloadPost(postId) {
+            const post = allPosts.find(function(p) { return p.id === postId; });
+            if (!post) { showToast('❌ Post not found', 'error'); return; }
+            
+            let content = '';
+            content += '='.repeat(60) + '\n📱 SOCIAL POST DOWNLOAD\n' + '='.repeat(60) + '\n\n';
+            content += '📌 SOURCE: ' + (post.source_name || 'Unknown') + '\n';
+            content += '🕐 TIME: ' + (post.time || 'N/A') + '\n';
+            content += '🔗 LINK: ' + (post.post_link || 'N/A') + '\n\n';
+            content += '-'.repeat(60) + '\n\n📝 CONTENT:\n';
+            content += post.text || '(No text content)';
+            content += '\n\n';
+            if (post.images && post.images.length > 0) {
+                content += '-'.repeat(60) + '\n🖼️ IMAGES:\n';
+                post.images.forEach(function(img, i) {
+                    content += '  ' + (i+1) + '. ' + img + '\n';
+                });
+            }
+            content += '\n' + '='.repeat(60) + '\n📅 Downloaded: ' + new Date().toLocaleString() + '\n' + '='.repeat(60);
+            
+            const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'post_' + postId + '_' + new Date().toISOString().slice(0,10) + '.txt';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            downloadedPosts.add(postId);
+            saveDownloadedState();
+            updateDownloadButtons();
+            showToast('✅ Downloaded: ' + a.download, 'success');
+        }
+        
+        function updateDownloadButtons() {
+            document.querySelectorAll('.btn-download').forEach(function(btn) {
+                const postId = btn.dataset.postId;
+                if (downloadedPosts.has(postId)) {
+                    btn.classList.add('downloaded');
+                    btn.innerHTML = '✅ Downloaded';
+                    btn.disabled = true;
+                }
+            });
+        }
+        
+        // Fetch posts
+        async function fetchPosts() {
+            if (isLoading) return;
+            isLoading = true;
+            
+            const btn = document.getElementById('refreshBtn');
+            btn.classList.add('loading');
+            btn.disabled = true;
+            
+            const grid = document.getElementById('postsGrid');
+            grid.innerHTML = '<div class="loading-state"><div class="loader"></div><p>📡 Fetching latest posts...</p></div>';
+            
+            try {
+                showToast('🔄 Fetching fresh posts...', 'info');
+                const response = await fetch('/api/posts?limit=9');
+                const data = await response.json();
+                
+                if (data.success) {
+                    allPosts = data.posts || [];
+                    renderPosts(allPosts);
+                    updateStats(allPosts);
+                    updateFilters(allPosts);
+                    document.getElementById('cacheBadge').textContent = 'Fresh';
+                    document.getElementById('cacheBadge').style.background = '#667eea';
+                    document.getElementById('cacheBadge').style.color = 'white';
+                    showToast('✅ Loaded ' + allPosts.length + ' posts!', 'success');
+                } else {
+                    throw new Error(data.error || 'Failed to fetch');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                showToast('❌ Error: ' + error.message, 'error');
+                try {
+                    const cacheResponse = await fetch('/api/cache');
+                    const cacheData = await cacheResponse.json();
+                    if (cacheData.success && cacheData.posts.length > 0) {
+                        allPosts = cacheData.posts;
+                        renderPosts(allPosts);
+                        updateStats(allPosts);
+                        updateFilters(allPosts);
+                        document.getElementById('cacheBadge').textContent = 'Cached';
+                        document.getElementById('cacheBadge').style.background = '#28a745';
+                        document.getElementById('cacheBadge').style.color = 'white';
+                        showToast('📂 Loaded ' + allPosts.length + ' posts from cache', 'info');
+                    } else {
+                        grid.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h3>Failed to Load</h3><p>' + error.message + '</p></div>';
+                    }
+                } catch (e) {
+                    grid.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h3>Failed to Load</h3><p>' + error.message + '</p></div>';
+                }
+            }
+            
+            btn.classList.remove('loading');
+            btn.disabled = false;
+            isLoading = false;
+        }
+        
+        // Clear cache
+        async function clearCache() {
+            if (!confirm('Clear cached posts?')) return;
+            try {
+                const response = await fetch('/api/cache/clear', { method: 'DELETE' });
+                const data = await response.json();
+                if (data.success) {
+                    allPosts = [];
+                    downloadedPosts.clear();
+                    saveDownloadedState();
+                    renderPosts(allPosts);
+                    updateStats(allPosts);
+                    updateFilters(allPosts);
+                    showToast('🗑️ Cache cleared', 'success');
+                    document.getElementById('cacheBadge').textContent = 'Cleared';
+                    document.getElementById('cacheBadge').style.background = '#dc3545';
+                    document.getElementById('cacheBadge').style.color = 'white';
+                }
+            } catch (error) {
+                showToast('❌ Error: ' + error.message, 'error');
+            }
+        }
+        
+        // Render posts
+        function renderPosts(posts) {
+            const grid = document.getElementById('postsGrid');
+            let filtered = posts;
+            if (currentFilter === 'images') {
+                filtered = posts.filter(function(p) { return p.images && p.images.length > 0; });
+            } else if (currentFilter === 'quotes') {
+                filtered = posts.filter(function(p) { return p.text && p.text.length < 200 && p.text.length > 10; });
+            }
+            
+            if (!filtered || filtered.length === 0) {
+                grid.innerHTML = '<div class="empty-state"><div class="icon">📭</div><h3>No posts match this filter</h3><p>Try changing the filter or fetching new posts</p></div>';
+                return;
+            }
+            
+            var html = '';
+            filtered.forEach(function(post, index) {
+                const hasImage = post.images && post.images.length > 0;
+                const imageCount = hasImage ? post.images.length : 0;
+                const isQuote = post.text && post.text.length < 200 && post.text.length > 10;
+                const sourceName = post.source_name || 'Unknown';
+                const sourceInitial = sourceName.charAt(0).toUpperCase();
+                const isDownloaded = downloadedPosts.has(post.id);
+                
+                let displayText = post.text || '';
+                if (displayText.length > 300) displayText = displayText.substring(0, 300) + '...';
+                displayText = displayText.replace(/#([a-zA-Z0-9_]+)/g, '<span class="hashtag">#$1</span>');
+                
+                html += '<div class="post-card" style="animation-delay: ' + ((index % 9) * 0.03) + 's">';
+                html += '<div class="post-image-wrap">';
+                if (hasImage) {
+                    html += '<img src="' + post.images[0] + '" alt="Post image" loading="lazy" onerror="this.parentElement.innerHTML=\'<div class=\\\'no-image\\\'>📄</div>\'">';
+                    if (imageCount > 1) {
+                        html += '<span style="position:absolute;bottom:12px;right:12px;background:rgba(0,0,0,0.75);backdrop-filter:blur(10px);padding:2px 10px;border-radius:12px;font-size:11px;color:white;">+' + (imageCount - 1) + ' more</span>';
+                    }
+                } else {
+                    html += '<div class="no-image">📄</div>';
+                }
+                html += '<span class="post-source-tag">' + sourceInitial + ' ' + sourceName + '</span>';
+                html += '</div>';
+                html += '<div class="post-content">';
+                if (displayText) {
+                    html += '<div class="post-text ' + (isQuote ? 'quoted' : '') + '">' + displayText + '</div>';
+                }
+                html += '<div class="post-meta">';
+                html += '<span class="post-time">' + (post.time || 'N/A') + '</span>';
+                html += '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
+                html += '<button class="btn-download ' + (isDownloaded ? 'downloaded' : '') + '" data-post-id="' + post.id + '" onclick="downloadPost(\'' + post.id + '\')" ' + (isDownloaded ? 'disabled' : '') + '>';
+                html += isDownloaded ? '✅ Downloaded' : '⬇️ Download';
+                html += '</button>';
+                html += '<button class="btn-action post-now" onclick="loadPostForPostNow(\'' + post.id + '\')">📤 Post Now</button>';
+                html += '<button class="btn-action schedule" onclick="loadPostForSchedule(\'' + post.id + '\')">📅 Schedule</button>';
+                html += '</div>';
+                html += '</div></div></div>';
+            });
+            
+            grid.innerHTML = html;
+            document.getElementById('postCountFooter').textContent = filtered.length;
+            updateDownloadButtons();
+        }
+        
+        // Update stats
+        function updateStats(posts) {
+            if (!posts || posts.length === 0) {
+                ['totalPosts','totalImages','totalQuotes','totalSources'].forEach(function(id) {
+                    document.getElementById(id).textContent = '0';
+                });
+                document.getElementById('postCount').textContent = '0';
+                document.getElementById('sourceCount').textContent = '0';
+                document.getElementById('lastUpdate').textContent = '-';
+                return;
+            }
+            const total = posts.length;
+            const withImages = posts.filter(function(p) { return p.images && p.images.length > 0; }).length;
+            const quotes = posts.filter(function(p) { return p.text && p.text.length < 200 && p.text.length > 10; }).length;
+            const sources = new Set(posts.map(function(p) { return p.source_name; }));
+            
+            document.getElementById('totalPosts').textContent = total;
+            document.getElementById('totalImages').textContent = withImages;
+            document.getElementById('totalQuotes').textContent = quotes;
+            document.getElementById('totalSources').textContent = sources.size;
+            document.getElementById('postCount').textContent = total;
+            document.getElementById('sourceCount').textContent = sources.size;
+            document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+        }
+        
+        // Update filters
+        function updateFilters(posts) {
+            if (!posts) posts = allPosts;
+            const images = posts.filter(function(p) { return p.images && p.images.length > 0; });
+            const quotes = posts.filter(function(p) { return p.text && p.text.length < 200 && p.text.length > 10; });
+            document.getElementById('countAll').textContent = posts.length;
+            document.getElementById('countImages').textContent = images.length;
+            document.getElementById('countQuotes').textContent = quotes.length;
+        }
+        
+        // ============================================================
+        // POST NOW FUNCTIONS
+        // ============================================================
+        
+        async function loadProfileId() {
+            try {
+                const response = await fetch('/api/config/facebook-profile-id');
+                const data = await response.json();
+                if (data.success && data.profile_id) {
+                    profileId = data.profile_id;
+                    document.getElementById('profileDisplay').textContent = profileId;
+                    document.getElementById('scheduleProfileDisplay').textContent = profileId;
+                }
+            } catch (e) {
+                console.error('Error loading profile:', e);
+            }
+        }
+        
+        function loadPostForPostNow(postId) {
+            const post = allPosts.find(function(p) { return p.id === postId; });
+            if (!post) { showToast('❌ Post not found', 'error'); return; }
+            
+            document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+            document.querySelector('[data-tab="post"]').classList.add('active');
+            document.querySelectorAll('.tab-content').forEach(function(tc) { tc.classList.remove('active'); });
+            document.getElementById('tab-post').classList.add('active');
+            
+            document.getElementById('postContent').value = post.text || '';
+            
+            if (post.images && post.images.length > 0) {
+                document.getElementById('postMedia').value = post.images[0];
+                showToast(`📝 Loaded with ${post.images.length} image(s)`, 'info');
+            } else {
+                document.getElementById('postMedia').value = '';
+                showToast('📝 Loaded (no images)', 'info');
+            }
+            
+            loadProfileId();
+        }
+        
+        function loadPostForSchedule(postId) {
+            const post = allPosts.find(function(p) { return p.id === postId; });
+            if (!post) { showToast('❌ Post not found', 'error'); return; }
+            
+            document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+            document.querySelector('[data-tab="schedule"]').classList.add('active');
+            document.querySelectorAll('.tab-content').forEach(function(tc) { tc.classList.remove('active'); });
+            document.getElementById('tab-schedule').classList.add('active');
+            
+            document.getElementById('scheduleContent').value = post.text || '';
+            
+            if (post.images && post.images.length > 0) {
+                document.getElementById('scheduleMedia').value = post.images[0];
+                showToast(`📝 Loaded with ${post.images.length} image(s)`, 'info');
+            } else {
+                document.getElementById('scheduleMedia').value = '';
+                showToast('📝 Loaded (no images)', 'info');
+            }
+            
+            // Set default time to 2 hours from now
+            const defaultTime = new Date();
+            defaultTime.setHours(defaultTime.getHours() + 2);
+            defaultTime.setMinutes(0, 0, 0);
+            document.getElementById('scheduleTime').value = defaultTime.toISOString().slice(0, 16);
+            
+            updateTimeHint();
+            loadProfileId();
+        }
+        
+        async function submitPostNow(e) {
+            e.preventDefault();
+            
+            const content = document.getElementById('postContent').value;
+            const mediaUrl = document.getElementById('postMedia').value;
+            
+            if (!content) { showToast('❌ Please enter post content', 'error'); return; }
+            
+            try {
+                showToast('🚀 Posting to Facebook...', 'info');
+                const submitBtn = document.querySelector('#postForm button[type="submit"]');
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = '⏳ Posting...';
+                
+                const response = await fetch('/api/post/now', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        content: content,
+                        image_url: mediaUrl || null,
+                        image_urls: mediaUrl ? [mediaUrl] : []
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    showToast('✅ Posted to Facebook successfully!', 'success');
+                    document.getElementById('postForm').reset();
+                    document.getElementById('postResult').innerHTML = `
+                        <div style="background:#e8f5e9;border:1px solid #28a745;border-radius:8px;padding:16px;margin-top:16px;">
+                            <strong>✅ Posted Successfully!</strong><br>
+                            📝 ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}<br>
+                            ${mediaUrl ? '🖼️ With image<br>' : ''}
+                            🆔 Post ID: ${data.post_id}<br>
+                            🔗 <a href="${data.url}" target="_blank">View Post</a>
+                        </div>
+                    `;
+                    loadHistory();
+                } else {
+                    throw new Error(data.error || 'Failed to post');
+                }
+            } catch (error) {
+                showToast('❌ Error: ' + error.message, 'error');
+                document.getElementById('postResult').innerHTML = `
+                    <div style="background:#ffebee;border:1px solid #dc3545;border-radius:8px;padding:16px;margin-top:16px;">
+                        <strong>❌ Failed to Post</strong><br>
+                        ${error.message}
+                    </div>
+                `;
+            } finally {
+                const submitBtn = document.querySelector('#postForm button[type="submit"]');
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '🚀 Post Now';
+            }
+        }
+        
+        // ============================================================
+        // SCHEDULE FUNCTIONS - WITH TIME VALIDATION
+        // ============================================================
+        
+        async function submitSchedule(e) {
+            e.preventDefault();
+            
+            const content = document.getElementById('scheduleContent').value;
+            const scheduledTime = document.getElementById('scheduleTime').value;
+            const mediaUrl = document.getElementById('scheduleMedia').value;
+            
+            if (!content) { 
+                showToast('❌ Please enter post content', 'error'); 
+                return; 
+            }
+            if (!scheduledTime) { 
+                showToast('❌ Please select a date and time', 'error'); 
+                return; 
+            }
+            
+            // ============================================================
+            // VALIDATE TIME - MUST BE 5+ MINUTES IN FUTURE
+            // ============================================================
+            const validation = validateScheduleTime(scheduledTime);
+            if (!validation.valid) {
+                showToast(validation.message, 'error', 5000);
+                document.getElementById('scheduleTime').style.borderColor = '#dc3545';
+                setTimeout(() => {
+                    document.getElementById('scheduleTime').style.borderColor = '';
+                }, 3000);
+                return;
+            }
+            
+            try {
+                showToast('📅 Scheduling post...', 'info');
+                const submitBtn = document.querySelector('#scheduleForm button[type="submit"]');
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = '⏳ Scheduling...';
+                
+                // Convert local time to UTC ISO format
+                const localDate = new Date(scheduledTime);
+                const utcDate = new Date(localDate.getTime() - (localDate.getTimezoneOffset() * 60000));
+                const scheduledIso = utcDate.toISOString();
+                
+                const response = await fetch('/api/post/schedule', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        content: content,
+                        scheduled_time: scheduledIso,
+                        image_urls: mediaUrl ? [mediaUrl] : []
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    showToast(`✅ Scheduled for ${new Date(scheduledTime).toLocaleString()}`, 'success');
+                    document.getElementById('scheduleForm').reset();
+                    document.getElementById('scheduleResult').innerHTML = `
+                        <div style="background:#e8f5e9;border:1px solid #28a745;border-radius:8px;padding:16px;margin-top:16px;">
+                            <strong>✅ Scheduled Successfully!</strong><br>
+                            📝 ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}<br>
+                            ${mediaUrl ? '🖼️ With image<br>' : ''}
+                            🕐 Scheduled for: ${new Date(scheduledTime).toLocaleString()}<br>
+                            🆔 Post ID: ${data.post_id || 'scheduled'}
+                        </div>
+                    `;
+                    loadHistory();
+                } else {
+                    // Check if it's a duplicate error
+                    if (data.error && (data.error.includes('409') || data.error.includes('already scheduled'))) {
+                        showToast('⚠️ This content was already scheduled recently. Please use different content.', 'warning', 5000);
+                    } else {
+                        throw new Error(data.error || 'Failed to schedule');
+                    }
+                }
+            } catch (error) {
+                showToast('❌ Error: ' + error.message, 'error');
+                document.getElementById('scheduleResult').innerHTML = `
+                    <div style="background:#ffebee;border:1px solid #dc3545;border-radius:8px;padding:16px;margin-top:16px;">
+                        <strong>❌ Failed to Schedule</strong><br>
+                        ${error.message}
+                    </div>
+                `;
+            } finally {
+                const submitBtn = document.querySelector('#scheduleForm button[type="submit"]');
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '📅 Schedule Post';
+            }
+        }
+        
+        // ============================================================
+        // HISTORY FUNCTIONS
+        // ============================================================
+        
+        async function loadHistory() {
+            try {
+                const response = await fetch('/api/history');
+                const data = await response.json();
+                const container = document.getElementById('historyList');
+                if (data.success && data.history && data.history.length > 0) {
+                    var html = '';
+                    data.history.slice().reverse().forEach(function(post) {
+                        const isScheduled = post.scheduled_for && !post.posted_at;
+                        const badge = isScheduled ? 'badge-scheduled' : 'badge-facebook';
+                        const badgeText = isScheduled ? '📅 Scheduled' : 'Facebook';
+                        const timeText = isScheduled ? post.scheduled_for : (post.posted_at || post.time || 'Now');
+                        html += '<div class="queue-item"><div class="info">';
+                        html += '<div class="title">' + (isScheduled ? '📅 ' : '✅ ') + (post.content || '').slice(0,100) + '...</div>';
+                        html += '<div class="details"><span class="' + badge + '">' + badgeText + '</span> • 🕐 ' + timeText + (post.url ? ' • <a href="' + post.url + '" target="_blank">View</a>' : '') + '</div></div>';
+                        html += '</div>';
+                    });
+                    container.innerHTML = html;
+                } else {
+                    container.innerHTML = '<p style="color:#868e96;">No posts published yet</p>';
+                }
+            } catch (error) {
+                document.getElementById('historyList').innerHTML = '<p style="color:#868e96;">Error loading history</p>';
+            }
+        }
+        
+        // ============================================================
+        // INITIALIZATION
+        // ============================================================
+        
+        async function loadFromCacheOnStart() {
+            try {
+                const response = await fetch('/api/cache');
+                const data = await response.json();
+                if (data.success && data.posts.length > 0) {
+                    allPosts = data.posts;
+                    renderPosts(allPosts);
+                    updateStats(allPosts);
+                    updateFilters(allPosts);
+                    document.getElementById('cacheBadge').textContent = 'Cached';
+                    document.getElementById('cacheBadge').style.background = '#28a745';
+                    document.getElementById('cacheBadge').style.color = 'white';
+                } else {
+                    document.getElementById('cacheBadge').textContent = 'Ready';
+                    document.getElementById('cacheBadge').style.background = '#e9ecef';
+                    document.getElementById('cacheBadge').style.color = '#495057';
+                }
+            } catch (e) {}
+        }
+        
+        document.addEventListener('DOMContentLoaded', function() {
+            loadDownloadedState();
+            loadFromCacheOnStart();
+            loadHistory();
+            loadProfileId();
+            updateTimeHint();
+            
+            document.querySelectorAll('.filter-btn').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    document.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.remove('active'); });
+                    this.classList.add('active');
+                    currentFilter = this.dataset.filter;
+                    renderPosts(allPosts);
+                });
+            });
+        });
+        
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'r' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); fetchPosts(); }
+            if (e.key === 'Escape') { document.querySelectorAll('.toast').forEach(function(t) { t.remove(); }); }
+        });
+    </script>
+</body>
+</html>
+'''
+
+# ============================================================
+# FLASK ROUTES
+# ============================================================
+
+@app.route('/')
+def home():
+    return render_template_string(DASHBOARD_HTML)
+
+# ============================================================
+# POST FETCHING ROUTES
+# ============================================================
+
+@app.route('/api/posts', methods=['GET'])
+def get_posts():
+    limit = request.args.get('limit', 9, type=int)
+    try:
+        logger.info(f"Fetching {limit} posts per source...")
+        posts = fetch_facebook_posts(limit)
+        save_posts(posts)
+        return jsonify({
+            'success': True,
+            'count': len(posts),
+            'posts': posts,
+            'fetched_at': datetime.now().isoformat()
+        })
+    except Exception as e:
+        logger.error(f"Error fetching posts: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/cache', methods=['GET'])
+def get_cache():
+    posts = load_posts()
+    return jsonify({
+        'success': True,
+        'count': len(posts),
+        'posts': posts,
+        'from_cache': True
+    })
+
+@app.route('/api/cache/clear', methods=['DELETE'])
+def clear_cache():
+    try:
+        if os.path.exists(POSTS_FILE):
+            os.remove(POSTS_FILE)
+        return jsonify({'success': True, 'message': 'Cache cleared'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ============================================================
+# CONFIG ROUTE
+# ============================================================
+
+@app.route('/api/config/facebook-profile-id', methods=['GET'])
+def get_facebook_profile_id():
+    try:
+        return jsonify({
+            'success': True,
+            'profile_id': FACEBOOK_PROFILE_ID
+        })
+    except Exception as e:
+        logger.error(f"Error getting profile ID: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+# ============================================================
+# POST NOW ROUTE
+# ============================================================
+
+@app.route('/api/post/now', methods=['POST'])
+def post_to_facebook_now():
+    data = request.json
+    
+    try:
+        content = data.get('content')
+        image_url = data.get('image_url')
+        image_urls = data.get('image_urls', [])
+        
+        if not content:
+            return jsonify({'success': False, 'error': 'Content is required'}), 400
+        
+        logger.info(f"📨 Post Now: {content[:50]}...")
+        
+        if image_urls and len(image_urls) > 0:
+            result = facebook_poster.post_with_images(content, image_urls)
+        elif image_url:
+            result = facebook_poster.post_with_image(content, image_url)
+        else:
+            result = facebook_poster.post_text(content)
+        
+        if result.get('success'):
+            history = load_history()
+            history.append({
+                'id': result.get('post_id', 'unknown'),
+                'content': content,
+                'platform': 'facebook',
+                'posted_at': datetime.now().isoformat(),
+                'url': result.get('url', '')
+            })
+            save_history(history)
+            logger.info(f"✅ Post successful: {result.get('post_id')}")
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"Error posting: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+# ============================================================
+# SCHEDULE ROUTE - UPDATED
+# ============================================================
+
+@app.route('/api/post/schedule', methods=['POST'])
+def schedule_facebook_post():
+    data = request.json
+    
+    try:
+        content = data.get('content')
+        scheduled_time = data.get('scheduled_time')
+        image_urls = data.get('image_urls', [])
+        
+        if not content:
+            return jsonify({'success': False, 'error': 'Content is required'}), 400
+        
+        if not scheduled_time:
+            return jsonify({'success': False, 'error': 'Scheduled time is required'}), 400
+        
+        # Clean the time - remove timezone info if present
+        # Zernio expects local time without timezone, with timezone parameter
+        if 'Z' in scheduled_time:
+            scheduled_time = scheduled_time.replace('Z', '')
+        if '+' in scheduled_time:
+            scheduled_time = scheduled_time.split('+')[0]
+        if 'T' not in scheduled_time:
+            try:
+                dt = datetime.fromisoformat(scheduled_time)
+                scheduled_time = dt.strftime("%Y-%m-%dT%H:%M:%S")
+            except:
+                pass
+        
+        logger.info(f"📅 Schedule: {content[:50]}... at {scheduled_time}")
+        if image_urls:
+            logger.info(f"🖼️ With {len(image_urls)} image(s)")
+        
+        result = facebook_poster.schedule_post(content, scheduled_time, image_urls)
+        
+        if result.get('success'):
+            history = load_history()
+            history.append({
+                'id': result.get('post_id', 'scheduled'),
+                'content': content,
+                'platform': 'facebook',
+                'scheduled_for': scheduled_time,
+                'status': result.get('status', 'scheduled'),
+                'url': result.get('url', ''),
+                'type': 'scheduled'
+            })
+            save_history(history)
+            logger.info(f"✅ Post scheduled: {result.get('post_id')}")
+        else:
+            # Log the error
+            logger.error(f"❌ Schedule failed: {result.get('error')}")
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error scheduling: {error_msg}")
+        return jsonify({'success': False, 'error': error_msg}), 400
+
+# ============================================================
+# HISTORY ROUTE
+# ============================================================
+
+@app.route('/api/history', methods=['GET'])
+def get_history():
+    try:
+        history = load_history()
+        return jsonify({
+            'success': True,
+            'history': history
+        })
+    except Exception as e:
+        logger.error(f"Error fetching history: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+# ============================================================
+# RUN SERVER
+# ============================================================
+
+if __name__ == '__main__':
+    logger.info("🚀 Starting Social Feed Dashboard - Complete")
+    logger.info("📱 Open http://localhost:5000")
+    logger.info(f"🌍 Timezone: {TIMEZONE} (GMT+3)")
+    logger.info(f"⏰ Min schedule: {MIN_SCHEDULE_MINUTES} minutes ahead")
+    logger.info("📘 Facebook Profile ID: {}".format(FACEBOOK_PROFILE_ID))
+    app.run(debug=True, host='0.0.0.0', port=5000)
