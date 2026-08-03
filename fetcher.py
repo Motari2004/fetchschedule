@@ -1,13 +1,86 @@
 # ============================================================
-# FACEBOOK POST FETCHER - NO DEDUPLICATION
+# FACEBOOK POST FETCHER - WITH REDIS STORAGE
 # ============================================================
 
 import requests
 import json
 import re
+import os
+import logging
 from datetime import datetime
 from config import SOCIAL_API_TOKEN, SOURCE_ACCOUNTS
 from time_utils import convert_to_kenya_time, format_kenya_datetime
+
+logger = logging.getLogger(__name__)
+
+# ============================================================
+# REDIS INTEGRATION (try to import from app)
+# ============================================================
+
+REDIS_AVAILABLE = False
+redis = None
+REDIS_KEY_POSTS = "social_feed:posts"
+
+try:
+    # Try to import Redis from the main app
+    from app import REDIS_AVAILABLE as APP_REDIS_AVAILABLE
+    from app import redis as APP_REDIS
+    from app import REDIS_KEY_POSTS as APP_REDIS_KEY_POSTS
+    
+    REDIS_AVAILABLE = APP_REDIS_AVAILABLE
+    redis = APP_REDIS
+    REDIS_KEY_POSTS = APP_REDIS_KEY_POSTS
+    logger.info("✅ Redis available in fetcher")
+except ImportError:
+    logger.warning("⚠️ Redis not available in fetcher, using file storage")
+except Exception as e:
+    logger.warning(f"⚠️ Error importing Redis: {e}")
+
+# ============================================================
+# FALLBACK FILE STORAGE
+# ============================================================
+
+def get_data_dir():
+    if os.path.exists('/tmp'):
+        return '/tmp'
+    return os.path.dirname(os.path.abspath(__file__))
+
+DATA_DIR = get_data_dir()
+POSTS_FILE_FALLBACK = os.path.join(DATA_DIR, 'posts_cache.json')
+
+def save_posts_fallback(posts):
+    try:
+        with open(POSTS_FILE_FALLBACK, 'w', encoding='utf-8') as f:
+            json.dump({
+                'posts': posts,
+                'last_updated': datetime.now().isoformat(),
+                'count': len(posts)
+            }, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        logger.error(f"Error saving posts to file: {e}")
+        return False
+
+def save_posts_to_redis(posts):
+    """Save posts to Redis"""
+    try:
+        if REDIS_AVAILABLE and redis:
+            data = {
+                'posts': posts,
+                'last_updated': datetime.now().isoformat(),
+                'count': len(posts)
+            }
+            redis.set(REDIS_KEY_POSTS, json.dumps(data), ex=86400)
+            logger.info(f"💾 Saved {len(posts)} posts to Redis from fetcher")
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error saving posts to Redis: {e}")
+        return False
+
+# ============================================================
+# MAIN FETCH FUNCTION
+# ============================================================
 
 def fetch_facebook_posts(limit=9):
     """
@@ -21,7 +94,7 @@ def fetch_facebook_posts(limit=9):
     # Sort sources by priority
     sorted_sources = sorted(SOURCE_ACCOUNTS, key=lambda x: x.get('priority', 999))
     
-    print(f"  📡 Fetching {per_source_limit} posts from EACH of {len(sorted_sources)} sources...")
+    logger.info(f"📡 Fetching {per_source_limit} posts from EACH of {len(sorted_sources)} sources...")
     
     # Fetch from ALL sources
     for source in sorted_sources:
@@ -29,13 +102,13 @@ def fetch_facebook_posts(limit=9):
         source_url = source.get('url')
         source_priority = source.get('priority', 999)
         
-        print(f"    📋 {source_name} (Priority {source_priority})...")
+        logger.info(f"📋 {source_name} (Priority {source_priority})...")
         
         # Fetch posts from this source
         posts = fetch_from_source(source_url, per_source_limit)
         
         if not posts:
-            print(f"      📭 No posts from {source_name}")
+            logger.info(f"📭 No posts from {source_name}")
             continue
         
         # Add source info to each post
@@ -45,13 +118,22 @@ def fetch_facebook_posts(limit=9):
             post['source_url'] = source_url
             post['source_priority'] = source_priority
         
-        print(f"      ✅ Found {len(posts)} posts from {source_name}")
+        logger.info(f"✅ Found {len(posts)} posts from {source_name}")
         all_posts.extend(posts)
     
     # Sort by time (newest first)
     all_posts.sort(key=lambda x: x.get('time_original', ''), reverse=True)
     
-    print(f"  📊 Total: {len(all_posts)} posts collected from all sources")
+    logger.info(f"📊 Total: {len(all_posts)} posts collected from all sources")
+    
+    # ============================================================
+    # SAVE TO REDIS (primary) OR FILE (fallback)
+    # ============================================================
+    if all_posts:
+        if not save_posts_to_redis(all_posts):
+            # Fallback to file if Redis fails
+            logger.warning("⚠️ Redis save failed, using file fallback")
+            save_posts_fallback(all_posts)
     
     return all_posts
 
@@ -121,12 +203,11 @@ def fetch_from_source(page_url, limit=9):
             return formatted_posts
             
         else:
-            print(f"      ❌ API Error {response.status_code}")
-            print(f"      Response: {response.text[:200]}")
+            logger.error(f"❌ API Error {response.status_code}")
             return []
             
     except Exception as e:
-        print(f"      ❌ Error fetching: {e}")
+        logger.error(f"❌ Error fetching: {e}")
         return []
 
 # ============================================================
