@@ -34,55 +34,291 @@ from config import ZERNIO_API_KEY, FACEBOOK_PROFILE_ID
 TIMEZONE = "Africa/Nairobi"  # GMT+3
 MIN_SCHEDULE_MINUTES = 5     # Minimum minutes ahead for scheduling
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ============================================================
-# PERSISTENT STORAGE
+# UPSTASH REDIS REST API (No package required!)
 # ============================================================
 
-POSTS_FILE = 'posts_cache.json'
-HISTORY_FILE = 'post_history.json'
+import requests
+import json
+
+class UpstashRedis:
+    """Upstash Redis REST API client - no package needed"""
+    
+    def __init__(self, url, token):
+        self.url = url.rstrip('/')
+        self.token = token
+        self.headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+    
+    def _request(self, command, *args):
+        """Execute a Redis command via REST API"""
+        try:
+            # Build URL with command and args
+            url = f"{self.url}/{command}"
+            for arg in args:
+                # URL encode the argument if needed
+                import urllib.parse
+                url += f"/{urllib.parse.quote(str(arg), safe='')}"
+            
+            response = requests.get(url, headers=self.headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('result')
+            else:
+                logger.error(f"Redis error: {response.status_code} - {response.text}")
+                return None
+        except Exception as e:
+            logger.error(f"Redis request error: {e}")
+            return None
+    
+    def set(self, key, value, ex=None):
+        """Set a key with optional TTL (seconds)"""
+        try:
+            if ex:
+                return self._request('SET', key, value, 'EX', ex)
+            return self._request('SET', key, value)
+        except Exception as e:
+            logger.error(f"Redis SET error: {e}")
+            return None
+    
+    def get(self, key):
+        """Get a key value"""
+        try:
+            return self._request('GET', key)
+        except Exception as e:
+            logger.error(f"Redis GET error: {e}")
+            return None
+    
+    def delete(self, key):
+        """Delete a key"""
+        try:
+            return self._request('DEL', key)
+        except Exception as e:
+            logger.error(f"Redis DEL error: {e}")
+            return None
+    
+    def exists(self, key):
+        """Check if key exists"""
+        try:
+            return self._request('EXISTS', key)
+        except Exception as e:
+            logger.error(f"Redis EXISTS error: {e}")
+            return None
+    
+    def ping(self):
+        """Ping Redis server"""
+        try:
+            result = self._request('PING')
+            return result == 'PONG'
+        except Exception as e:
+            logger.error(f"Redis PING error: {e}")
+            return False
+
+# Initialize Redis client
+redis = None
+REDIS_AVAILABLE = False
+
+try:
+    from config import UPSTASH_REDIS_URL, UPSTASH_REDIS_TOKEN
+    
+    if UPSTASH_REDIS_URL and UPSTASH_REDIS_TOKEN:
+        redis = UpstashRedis(UPSTASH_REDIS_URL, UPSTASH_REDIS_TOKEN)
+        # Test connection
+        if redis.ping():
+            REDIS_AVAILABLE = True
+            logger.info("✅ Upstash Redis connected successfully via REST API!")
+        else:
+            logger.error("❌ Failed to ping Redis")
+    else:
+        logger.warning("⚠️ Upstash Redis credentials not configured, using file storage")
+        
+except ImportError:
+    logger.warning("⚠️ Config import failed, using file storage")
+    redis = None
+    REDIS_AVAILABLE = False
+except Exception as e:
+    logger.error(f"❌ Redis initialization error: {e}")
+    redis = None
+    REDIS_AVAILABLE = False
+
+# Redis keys
+REDIS_KEY_POSTS = "social_feed:posts"
+REDIS_KEY_HISTORY = "social_feed:history"
+REDIS_KEY_SCHEDULED = "social_feed:scheduled"
+
+# ============================================================
+# PERSISTENT STORAGE - Upstash Redis with fallback
+# ============================================================
+
+import tempfile
+
+def get_data_dir():
+    """Get a writable directory (works on Vercel)"""
+    if os.path.exists('/tmp'):
+        return '/tmp'
+    return os.path.dirname(os.path.abspath(__file__))
+
+DATA_DIR = get_data_dir()
+POSTS_FILE_FALLBACK = os.path.join(DATA_DIR, 'posts_cache.json')
+HISTORY_FILE_FALLBACK = os.path.join(DATA_DIR, 'post_history.json')
 
 def save_posts(posts):
-    with open(POSTS_FILE, 'w', encoding='utf-8') as f:
-        json.dump({
-            'posts': posts,
-            'last_updated': datetime.now().isoformat(),
-            'count': len(posts)
-        }, f, ensure_ascii=False, indent=2)
-    return True
+    """Save posts to Redis or fallback to file"""
+    try:
+        if REDIS_AVAILABLE and redis:
+            data = {
+                'posts': posts,
+                'last_updated': datetime.now().isoformat(),
+                'count': len(posts)
+            }
+            redis.set(REDIS_KEY_POSTS, json.dumps(data), ex=86400)  # 24 hour TTL
+            logger.info(f"💾 Saved {len(posts)} posts to Redis")
+            return True
+        else:
+            return save_posts_fallback(posts)
+    except Exception as e:
+        logger.error(f"Error saving posts to Redis: {e}")
+        return save_posts_fallback(posts)
 
 def load_posts():
+    """Load posts from Redis or fallback to file"""
     try:
-        if os.path.exists(POSTS_FILE):
-            with open(POSTS_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                return data.get('posts', [])
-    except:
-        pass
-    return []
+        if REDIS_AVAILABLE and redis:
+            data = redis.get(REDIS_KEY_POSTS)
+            if data:
+                parsed = json.loads(data)
+                logger.info(f"📂 Loaded {parsed.get('count', 0)} posts from Redis")
+                return parsed.get('posts', [])
+        return load_posts_fallback()
+    except Exception as e:
+        logger.error(f"Error loading posts from Redis: {e}")
+        return load_posts_fallback()
 
 def save_history(history):
-    with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
-    return True
+    """Save history to Redis or fallback to file"""
+    try:
+        if REDIS_AVAILABLE and redis:
+            redis.set(REDIS_KEY_HISTORY, json.dumps(history), ex=2592000)  # 30 day TTL
+            logger.info(f"💾 Saved {len(history)} history entries to Redis")
+            return True
+        else:
+            return save_history_fallback(history)
+    except Exception as e:
+        logger.error(f"Error saving history to Redis: {e}")
+        return save_history_fallback(history)
 
 def load_history():
+    """Load history from Redis or fallback to file"""
     try:
-        if os.path.exists(HISTORY_FILE):
-            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-    except:
-        pass
+        if REDIS_AVAILABLE and redis:
+            data = redis.get(REDIS_KEY_HISTORY)
+            if data:
+                history = json.loads(data)
+                logger.info(f"📂 Loaded {len(history)} history entries from Redis")
+                return history
+        return load_history_fallback()
+    except Exception as e:
+        logger.error(f"Error loading history from Redis: {e}")
+        return load_history_fallback()
+
+def save_scheduled_posts(posts):
+    """Save scheduled posts to Redis"""
+    try:
+        if REDIS_AVAILABLE and redis:
+            redis.set(REDIS_KEY_SCHEDULED, json.dumps(posts), ex=2592000)
+            logger.info(f"💾 Saved {len(posts)} scheduled posts to Redis")
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error saving scheduled posts: {e}")
+        return False
+
+def load_scheduled_posts():
+    """Load scheduled posts from Redis"""
+    try:
+        if REDIS_AVAILABLE and redis:
+            data = redis.get(REDIS_KEY_SCHEDULED)
+            if data:
+                scheduled = json.loads(data)
+                logger.info(f"📂 Loaded {len(scheduled)} scheduled posts from Redis")
+                return scheduled
+        return []
+    except Exception as e:
+        logger.error(f"Error loading scheduled posts: {e}")
+        return []
+
+# ============================================================
+# FALLBACK FILE STORAGE (for local development)
+# ============================================================
+
+def save_posts_fallback(posts):
+    try:
+        with open(POSTS_FILE_FALLBACK, 'w', encoding='utf-8') as f:
+            json.dump({
+                'posts': posts,
+                'last_updated': datetime.now().isoformat(),
+                'count': len(posts)
+            }, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        logger.error(f"Error saving posts to file: {e}")
+        return False
+
+def load_posts_fallback():
+    try:
+        if os.path.exists(POSTS_FILE_FALLBACK):
+            with open(POSTS_FILE_FALLBACK, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get('posts', [])
+    except Exception as e:
+        logger.error(f"Error loading posts from file: {e}")
     return []
 
+def save_history_fallback(history):
+    try:
+        with open(HISTORY_FILE_FALLBACK, 'w', encoding='utf-8') as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        logger.error(f"Error saving history to file: {e}")
+        return False
 
-
-
-
-
-
-
-
-
+def load_history_fallback():
+    try:
+        if os.path.exists(HISTORY_FILE_FALLBACK):
+            with open(HISTORY_FILE_FALLBACK, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading history from file: {e}")
+    return []
 
 
 
@@ -425,54 +661,6 @@ class FacebookPoster:
             error_msg = str(e)
             logger.error(f"❌ Failed to schedule post: {error_msg}")
             return {"success": False, "error": error_msg}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 # Create Facebook poster instance
 facebook_poster = FacebookPoster()
@@ -1649,8 +1837,8 @@ def get_cache():
 @app.route('/api/cache/clear', methods=['DELETE'])
 def clear_cache():
     try:
-        if os.path.exists(POSTS_FILE):
-            os.remove(POSTS_FILE)
+        if os.path.exists(POSTS_FILE_FALLBACK):
+            os.remove(POSTS_FILE_FALLBACK)
         return jsonify({'success': True, 'message': 'Cache cleared'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -1776,6 +1964,38 @@ def schedule_facebook_post():
         return jsonify({'success': False, 'error': error_msg}), 400
 
 # ============================================================
+# HEALTH CHECK ROUTE
+# ============================================================
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Check system health including Redis connection"""
+    status = {
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat(),
+        'redis': {
+            'available': REDIS_AVAILABLE,
+            'connected': False
+        },
+        'storage': {
+            'type': 'redis' if REDIS_AVAILABLE else 'file',
+            'directory': DATA_DIR
+        },
+        'timezone': TIMEZONE
+    }
+    
+    # Test Redis connection
+    if REDIS_AVAILABLE and redis:
+        try:
+            redis.ping()
+            status['redis']['connected'] = True
+        except Exception as e:
+            status['redis']['connected'] = False
+            status['redis']['error'] = str(e)
+    
+    return jsonify(status)
+
+# ============================================================
 # HISTORY ROUTE
 # ============================================================
 
@@ -1801,4 +2021,5 @@ if __name__ == '__main__':
     logger.info(f"🌍 Timezone: {TIMEZONE} (GMT+3)")
     logger.info(f"⏰ Min schedule: {MIN_SCHEDULE_MINUTES} minutes ahead")
     logger.info("📘 Facebook Profile ID: {}".format(FACEBOOK_PROFILE_ID))
+    logger.info(f"💾 Storage: {'Redis' if REDIS_AVAILABLE else 'File (fallback)'}")
     app.run(debug=True, host='0.0.0.0', port=5000)

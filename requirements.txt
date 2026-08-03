@@ -4,3 +4,4 @@ requests==2.31.0
 pytz==2023.3
 python-dotenv==1.0.0
 zernio-sdk>=0.1.0
+upstash-redis==1.0.0
