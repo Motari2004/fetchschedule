@@ -972,16 +972,56 @@ DASHBOARD_HTML = r'''
             return { valid: true };
         }
         
-        function updateTimeHint() {
-            const now = new Date();
-            const minTime = new Date(now.getTime() + 5 * 60000);
-            const minTimeStr = minTime.toLocaleTimeString();
-            const hint = document.getElementById('timeHint');
-            if (hint) {
-                hint.textContent = `⏰ Must be at least 5 minutes from now (minimum: ${minTimeStr})`;
-                hint.style.color = '#6c757d';
-            }
-        }
+        
+        
+        
+        
+function setDefaultScheduleTime() {
+    const now = new Date();
+    // Set to 2 hours from now
+    const defaultTime = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+    // Round to nearest 15 minutes
+    defaultTime.setMinutes(Math.ceil(defaultTime.getMinutes() / 15) * 15);
+    defaultTime.setSeconds(0);
+    defaultTime.setMilliseconds(0);
+    
+    // Format as YYYY-MM-DDTHH:mm (24-hour format for input value)
+    const year = defaultTime.getFullYear();
+    const month = String(defaultTime.getMonth() + 1).padStart(2, '0');
+    const day = String(defaultTime.getDate()).padStart(2, '0');
+    const hours = String(defaultTime.getHours()).padStart(2, '0');
+    const minutes = String(defaultTime.getMinutes()).padStart(2, '0');
+    
+    const formatted = `${year}-${month}-${day}T${hours}:${minutes}`;
+    document.getElementById('scheduleTime').value = formatted;
+}
+        
+        
+        
+        
+        
+        
+        
+        
+        
+function updateTimeHint() {
+    const now = new Date();
+    const minTime = new Date(now.getTime() + 5 * 60000);
+    
+    // Format in 12-hour AM/PM
+    let hours = minTime.getHours();
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    hours = hours % 12;
+    hours = hours ? hours : 12;
+    const minutes = String(minTime.getMinutes()).padStart(2, '0');
+    const minTimeStr = `${hours}:${minutes} ${ampm}`;
+    
+    const hint = document.getElementById('timeHint');
+    if (hint) {
+        hint.textContent = `⏰ Must be at least 5 minutes from now (minimum: ${minTimeStr})`;
+        hint.style.color = '#6c757d';
+    }
+}
         
         // ============================================================
         // TAB SWITCHING
@@ -1391,34 +1431,43 @@ DASHBOARD_HTML = r'''
         // ============================================================
         // LOAD POST FOR SCHEDULE
         // ============================================================
-        function loadPostForSchedule(postId) {
-            const post = allPosts.find(function(p) { return p.id === postId; });
-            if (!post) { showToast('❌ Post not found', 'error'); return; }
-            
-            document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
-            document.querySelector('[data-tab="schedule"]').classList.add('active');
-            document.querySelectorAll('.tab-content').forEach(function(tc) { tc.classList.remove('active'); });
-            document.getElementById('tab-schedule').classList.add('active');
-            
-            document.getElementById('scheduleContent').value = post.text || '';
-            document.getElementById('scheduleForm').dataset.postId = postId;
-            
-            if (post.images && post.images.length > 0) {
-                document.getElementById('scheduleMedia').value = post.images[0];
-                showToast(`📝 Loaded with ${post.images.length} image(s)`, 'info');
-            } else {
-                document.getElementById('scheduleMedia').value = '';
-                showToast('📝 Loaded (no images)', 'info');
-            }
-            
-            const defaultTime = new Date();
-            defaultTime.setHours(defaultTime.getHours() + 2);
-            defaultTime.setMinutes(0, 0, 0);
-            document.getElementById('scheduleTime').value = defaultTime.toISOString().slice(0, 16);
-            
-            updateTimeHint();
-            loadProfileId();
-        }
+        
+        
+        
+function loadPostForSchedule(postId) {
+    const post = allPosts.find(function(p) { return p.id === postId; });
+    if (!post) { showToast('❌ Post not found', 'error'); return; }
+    
+    document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+    document.querySelector('[data-tab="schedule"]').classList.add('active');
+    document.querySelectorAll('.tab-content').forEach(function(tc) { tc.classList.remove('active'); });
+    document.getElementById('tab-schedule').classList.add('active');
+    
+    document.getElementById('scheduleContent').value = post.text || '';
+    document.getElementById('scheduleForm').dataset.postId = postId;
+    
+    if (post.images && post.images.length > 0) {
+        document.getElementById('scheduleMedia').value = post.images[0];
+        showToast(`📝 Loaded with ${post.images.length} image(s)`, 'info');
+    } else {
+        document.getElementById('scheduleMedia').value = '';
+        showToast('📝 Loaded (no images)', 'info');
+    }
+    
+    // Set default time in 12-hour format
+    setDefaultScheduleTime();
+    updateTimeHint();
+    loadProfileId();
+}
+        
+        
+        
+        
+        
+        
+        
+        
+        
         
         // ============================================================
         // SUBMIT POST NOW - WITH REMOVE FROM FEED
@@ -1493,98 +1542,129 @@ DASHBOARD_HTML = r'''
         // ============================================================
         // SUBMIT SCHEDULE - WITH REMOVE FROM FEED
         // ============================================================
-        async function submitSchedule(e) {
-            e.preventDefault();
+        
+        
+        
+        
+async function submitSchedule(e) {
+    e.preventDefault();
+    
+    const content = document.getElementById('scheduleContent').value;
+    const scheduledTime = document.getElementById('scheduleTime').value;
+    const mediaUrl = document.getElementById('scheduleMedia').value;
+    const postId = document.getElementById('scheduleForm').dataset.postId || null;
+    
+    if (!content) { 
+        showToast('❌ Please enter post content', 'error'); 
+        return; 
+    }
+    if (!scheduledTime) { 
+        showToast('❌ Please select a date and time', 'error'); 
+        return; 
+    }
+    
+    // Validate time (5+ minutes from now)
+    const selectedDate = new Date(scheduledTime);
+    const now = new Date();
+    const minTime = new Date(now.getTime() + 5 * 60000);
+    
+    if (selectedDate < minTime) {
+        showToast('⏰ Scheduled time must be at least 5 minutes from now', 'error', 5000);
+        document.getElementById('scheduleTime').style.borderColor = '#dc3545';
+        setTimeout(() => {
+            document.getElementById('scheduleTime').style.borderColor = '';
+        }, 3000);
+        return;
+    }
+    
+    try {
+        showToast('📅 Scheduling post...', 'info');
+        const submitBtn = document.querySelector('#scheduleForm button[type="submit"]');
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '⏳ Scheduling...';
+        
+        // Convert local time to UTC ISO format
+        const utcDate = new Date(selectedDate.getTime() - (selectedDate.getTimezoneOffset() * 60000));
+        const scheduledIso = utcDate.toISOString();
+        
+        const response = await fetch('/api/post/schedule', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                content: content,
+                scheduled_time: scheduledIso,
+                image_urls: mediaUrl ? [mediaUrl] : [],
+                post_id: postId
+            })
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+            // Format the display time in 12-hour format
+            const displayTime = selectedDate.toLocaleString('en-US', {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: 'numeric',
+                minute: '2-digit',
+                hour12: true
+            });
             
-            const content = document.getElementById('scheduleContent').value;
-            const scheduledTime = document.getElementById('scheduleTime').value;
-            const mediaUrl = document.getElementById('scheduleMedia').value;
-            const postId = document.getElementById('scheduleForm').dataset.postId || null;
+            showToast(`✅ Scheduled for ${displayTime}`, 'success');
+            document.getElementById('scheduleForm').reset();
+            document.getElementById('scheduleForm').dataset.postId = '';
+            document.getElementById('scheduleResult').innerHTML = `
+                <div style="background:#e8f5e9;border:1px solid #28a745;border-radius:8px;padding:16px;margin-top:16px;">
+                    <strong>✅ Scheduled Successfully!</strong><br>
+                    📝 ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}<br>
+                    ${mediaUrl ? '🖼️ With image<br>' : ''}
+                    🕐 Scheduled for: ${displayTime}<br>
+                    🆔 Post ID: ${data.post_id || 'scheduled'}
+                </div>
+            `;
+            loadHistory();
             
-            if (!content) { 
-                showToast('❌ Please enter post content', 'error'); 
-                return; 
-            }
-            if (!scheduledTime) { 
-                showToast('❌ Please select a date and time', 'error'); 
-                return; 
-            }
+            // REMOVE POST FROM FEED WITHOUT REFETCHING
+            allPosts = allPosts.filter(function(p) { return p.id !== postId; });
+            renderPosts(allPosts);
+            updateStats(allPosts);
+            updateFilters(allPosts);
             
-            const validation = validateScheduleTime(scheduledTime);
-            if (!validation.valid) {
-                showToast(validation.message, 'error', 5000);
-                document.getElementById('scheduleTime').style.borderColor = '#dc3545';
-                setTimeout(() => {
-                    document.getElementById('scheduleTime').style.borderColor = '';
-                }, 3000);
-                return;
-            }
-            
-            try {
-                showToast('📅 Scheduling post...', 'info');
-                const submitBtn = document.querySelector('#scheduleForm button[type="submit"]');
-                submitBtn.disabled = true;
-                submitBtn.innerHTML = '⏳ Scheduling...';
-                
-                const localDate = new Date(scheduledTime);
-                const utcDate = new Date(localDate.getTime() - (localDate.getTimezoneOffset() * 60000));
-                const scheduledIso = utcDate.toISOString();
-                
-                const response = await fetch('/api/post/schedule', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        content: content,
-                        scheduled_time: scheduledIso,
-                        image_urls: mediaUrl ? [mediaUrl] : [],
-                        post_id: postId
-                    })
-                });
-                
-                const data = await response.json();
-                if (data.success) {
-                    showToast(`✅ Scheduled for ${new Date(scheduledTime).toLocaleString()}`, 'success');
-                    document.getElementById('scheduleForm').reset();
-                    document.getElementById('scheduleForm').dataset.postId = '';
-                    document.getElementById('scheduleResult').innerHTML = `
-                        <div style="background:#e8f5e9;border:1px solid #28a745;border-radius:8px;padding:16px;margin-top:16px;">
-                            <strong>✅ Scheduled Successfully!</strong><br>
-                            📝 ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}<br>
-                            ${mediaUrl ? '🖼️ With image<br>' : ''}
-                            🕐 Scheduled for: ${new Date(scheduledTime).toLocaleString()}<br>
-                            🆔 Post ID: ${data.post_id || 'scheduled'}
-                        </div>
-                    `;
-                    loadHistory();
-                    
-                    // REMOVE POST FROM FEED WITHOUT REFETCHING
-                    allPosts = allPosts.filter(function(p) { return p.id !== postId; });
-                    renderPosts(allPosts);
-                    updateStats(allPosts);
-                    updateFilters(allPosts);
-                    
-                    showToast('✅ Post removed from feed', 'info');
-                } else {
-                    if (data.error && (data.error.includes('409') || data.error.includes('already scheduled'))) {
-                        showToast('⚠️ This content was already scheduled recently. Please use different content.', 'warning', 5000);
-                    } else {
-                        throw new Error(data.error || 'Failed to schedule');
-                    }
-                }
-            } catch (error) {
-                showToast('❌ Error: ' + error.message, 'error');
-                document.getElementById('scheduleResult').innerHTML = `
-                    <div style="background:#ffebee;border:1px solid #dc3545;border-radius:8px;padding:16px;margin-top:16px;">
-                        <strong>❌ Failed to Schedule</strong><br>
-                        ${error.message}
-                    </div>
-                `;
-            } finally {
-                const submitBtn = document.querySelector('#scheduleForm button[type="submit"]');
-                submitBtn.disabled = false;
-                submitBtn.innerHTML = '📅 Schedule Post';
+            showToast('✅ Post removed from feed', 'info');
+        } else {
+            if (data.error && (data.error.includes('409') || data.error.includes('already scheduled'))) {
+                showToast('⚠️ This content was already scheduled recently. Please use different content.', 'warning', 5000);
+            } else {
+                throw new Error(data.error || 'Failed to schedule');
             }
         }
+    } catch (error) {
+        showToast('❌ Error: ' + error.message, 'error');
+        document.getElementById('scheduleResult').innerHTML = `
+            <div style="background:#ffebee;border:1px solid #dc3545;border-radius:8px;padding:16px;margin-top:16px;">
+                <strong>❌ Failed to Schedule</strong><br>
+                ${error.message}
+            </div>
+        `;
+    } finally {
+        const submitBtn = document.querySelector('#scheduleForm button[type="submit"]');
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = '📅 Schedule Post';
+    }
+}
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
         
         // ============================================================
         // LOAD HISTORY
@@ -1618,21 +1698,24 @@ DASHBOARD_HTML = r'''
         // ============================================================
         // INITIALIZATION
         // ============================================================
-        document.addEventListener('DOMContentLoaded', function() {
-            loadFromCacheOnStart();
-            loadHistory();
-            loadProfileId();
-            updateTimeHint();
-            
-            document.querySelectorAll('.filter-btn').forEach(function(btn) {
-                btn.addEventListener('click', function() {
-                    document.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.remove('active'); });
-                    this.classList.add('active');
-                    currentFilter = this.dataset.filter;
-                    renderPosts(allPosts);
-                });
-            });
+document.addEventListener('DOMContentLoaded', function() {
+    loadFromCacheOnStart();
+    loadHistory();
+    loadProfileId();
+    
+    // Set default schedule time
+    setDefaultScheduleTime();
+    updateTimeHint();
+    
+    document.querySelectorAll('.filter-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            document.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.remove('active'); });
+            this.classList.add('active');
+            currentFilter = this.dataset.filter;
+            renderPosts(allPosts);
         });
+    });
+});
         
         document.addEventListener('keydown', function(e) {
             if (e.key === 'r' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); fetchPosts(); }
