@@ -13,7 +13,7 @@ load_dotenv()
 
 # SocialAPIs.io API Token
 # Get yours from: https://socialapis.io/dashboard
-SOCIAL_API_TOKEN = os.environ.get('SOCIAL_API_TOKEN', 'd4233569ef8db1ff6d9659f2b37efa4a58e38578b505df84fb2f6ef8f1a6f70b')
+SOCIAL_API_TOKEN = os.environ.get('SOCIAL_API_TOKEN', '2839c287339179d55df2fcea88f8682fcd6b7e66af908966878affedcdcfc77a')
 
 # Zernio API Key for scheduling
 # Get yours from: https://zernio.com/dashboard

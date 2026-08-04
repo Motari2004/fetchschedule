@@ -1,5 +1,5 @@
 # ============================================================
-# SOCIAL FEED DASHBOARD - COMPLETE WITH PERSISTENT REMOVAL
+# SOCIAL FEED DASHBOARD - COMPLETE WITH SOURCE MANAGER & MOBILE VIEW
 # ============================================================
 
 from flask import Flask, jsonify, request, render_template_string, send_file
@@ -30,6 +30,17 @@ CORS(app)
 # ============================================================
 
 from config import ZERNIO_API_KEY, FACEBOOK_PROFILE_ID
+
+# ============================================================
+# IMPORT SOURCE MANAGER
+# ============================================================
+
+try:
+    from source_manager import SourceManager, get_configured_sources, get_source_count, get_sources_summary
+    SOURCE_MANAGER_AVAILABLE = True
+except ImportError:
+    SOURCE_MANAGER_AVAILABLE = False
+    logger.warning("⚠️ Source Manager not available")
 
 # ============================================================
 # CONSTANTS
@@ -510,7 +521,7 @@ class FacebookPoster:
 facebook_poster = FacebookPoster()
 
 # ============================================================
-# HTML DASHBOARD - COMPLETE WITH PERSISTENT REMOVAL
+# HTML DASHBOARD - COMPLETE WITH SOURCE MANAGER & MOBILE VIEW
 # ============================================================
 
 DASHBOARD_HTML = r'''
@@ -518,7 +529,7 @@ DASHBOARD_HTML = r'''
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
     <title>Social Feed Dashboard</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
@@ -530,13 +541,14 @@ DASHBOARD_HTML = r'''
         
         .header { background: #ffffff; border-bottom: 1px solid #e9ecef; padding: 16px 32px; position: sticky; top: 0; z-index: 100; }
         .header-content { max-width: 1400px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }
-        .header-left { display: flex; align-items: center; gap: 16px; }
+        .header-left { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         .logo { display: flex; align-items: center; gap: 10px; }
         .logo-icon { width: 38px; height: 38px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 20px; color: white; }
         .logo h1 { font-size: 22px; font-weight: 800; color: #1a1a2e; }
         .logo h1 span { color: #667eea; }
         .badge { background: #e9ecef; color: #495057; padding: 2px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; }
         .badge.live { background: #28a745; color: white; animation: pulse 2s infinite; }
+        .badge.sources { background: #667eea; color: white; cursor: pointer; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
         
         .header-right { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
@@ -581,23 +593,24 @@ DASHBOARD_HTML = r'''
         .stat-card .label { color: #868e96; font-size: 13px; font-weight: 500; margin-top: 2px; }
         .stat-card .icon { font-size: 22px; margin-bottom: 4px; }
         
-        .tabs { display: flex; gap: 4px; background: #ffffff; padding: 4px; border-radius: 12px; border: 1px solid #e9ecef; margin: 16px 32px 0; max-width: 1400px; }
-        .tab-btn { padding: 10px 24px; border: none; border-radius: 8px; background: transparent; color: #868e96; font-weight: 600; font-size: 14px; cursor: pointer; transition: all 0.2s ease; font-family: 'Inter', sans-serif; flex: 1; }
+        .tabs { display: flex; gap: 4px; background: #ffffff; padding: 4px; border-radius: 12px; border: 1px solid #e9ecef; margin: 16px 32px 0; max-width: 1400px; overflow-x: auto; }
+        .tab-btn { padding: 10px 24px; border: none; border-radius: 8px; background: transparent; color: #868e96; font-weight: 600; font-size: 14px; cursor: pointer; transition: all 0.2s ease; font-family: 'Inter', sans-serif; flex: 1; white-space: nowrap; }
         .tab-btn:hover { background: #f1f3f5; color: #1a1a2e; }
         .tab-btn.active { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; box-shadow: 0 4px 15px rgba(102,126,234,0.3); }
         .tab-content { display: none; padding: 20px 32px; max-width: 1400px; margin: 0 auto; }
         .tab-content.active { display: block; }
         
-        .filters { display: flex; gap: 8px; flex-wrap: wrap; background: #ffffff; padding: 8px; border-radius: 12px; border: 1px solid #e9ecef; margin-bottom: 20px; }
-        .filter-btn { padding: 8px 18px; border: none; border-radius: 8px; background: transparent; color: #868e96; font-weight: 600; font-size: 13px; cursor: pointer; transition: all 0.2s ease; font-family: 'Inter', sans-serif; }
+        .filters { display: flex; gap: 8px; flex-wrap: wrap; background: #ffffff; padding: 8px; border-radius: 12px; border: 1px solid #e9ecef; margin-bottom: 20px; overflow-x: auto; }
+        .filter-btn { padding: 8px 18px; border: none; border-radius: 8px; background: transparent; color: #868e96; font-weight: 600; font-size: 13px; cursor: pointer; transition: all 0.2s ease; font-family: 'Inter', sans-serif; white-space: nowrap; }
         .filter-btn:hover { background: #f1f3f5; color: #1a1a2e; }
         .filter-btn.active { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; box-shadow: 0 4px 15px rgba(102,126,234,0.3); }
         .filter-btn .count { background: rgba(255,255,255,0.2); padding: 1px 8px; border-radius: 10px; font-size: 11px; margin-left: 4px; }
         .filter-btn.active .count { background: rgba(255,255,255,0.2); }
         
         .posts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 24px; }
-        .post-card { background: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid #e9ecef; transition: all 0.3s cubic-bezier(0.25,0.46,0.45,0.94); animation: fadeInUp 0.5s ease forwards; opacity: 0; }
+        .post-card { background: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid #e9ecef; transition: all 0.3s cubic-bezier(0.25,0.46,0.45,0.94); animation: fadeInUp 0.5s ease forwards; opacity: 0; cursor: pointer; }
         .post-card:hover { transform: translateY(-4px); box-shadow: 0 12px 40px rgba(0,0,0,0.08); border-color: #667eea; }
+        .post-card:active { transform: scale(0.98); }
         @keyframes fadeInUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
         .post-card:nth-child(1) { animation-delay: 0.03s; }
         .post-card:nth-child(2) { animation-delay: 0.06s; }
@@ -638,14 +651,8 @@ DASHBOARD_HTML = r'''
             backdrop-filter: blur(10px);
             border: 1px solid rgba(255,255,255,0.2);
         }
-        .btn-remove:hover {
-            background: #dc3545;
-            transform: scale(1.1);
-            box-shadow: 0 4px 15px rgba(220, 53, 69, 0.4);
-        }
-        .btn-remove:active {
-            transform: scale(0.9);
-        }
+        .btn-remove:hover { background: #dc3545; transform: scale(1.1); box-shadow: 0 4px 15px rgba(220, 53, 69, 0.4); }
+        .btn-remove:active { transform: scale(0.9); }
         
         .post-content { padding: 18px 20px 16px; }
         .post-text { font-size: 14px; line-height: 1.7; color: #2d3436; margin-bottom: 14px; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
@@ -663,6 +670,111 @@ DASHBOARD_HTML = r'''
         .btn-action.post-now:hover { box-shadow: 0 4px 15px rgba(24,119,242,0.3); }
         .btn-action.schedule { background: #ffc107; color: #1a1a2e; }
         .btn-action.schedule:hover { box-shadow: 0 4px 15px rgba(255,193,7,0.3); }
+        
+        /* ============================================================
+           FULL POST VIEW MODAL
+           ============================================================ */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.7);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+            backdrop-filter: blur(5px);
+        }
+        .modal-overlay.active {
+            display: flex;
+        }
+        .modal {
+            background: #ffffff;
+            border-radius: 16px;
+            max-width: 700px;
+            width: 100%;
+            max-height: 90vh;
+            overflow-y: auto;
+            padding: 0;
+            animation: modalIn 0.3s ease;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        @keyframes modalIn {
+            from { opacity: 0; transform: scale(0.95) translateY(20px); }
+            to { opacity: 1; transform: scale(1) translateY(0); }
+        }
+        .modal-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid #e9ecef;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            background: #ffffff;
+            z-index: 10;
+            border-radius: 16px 16px 0 0;
+        }
+        .modal-header h2 {
+            font-size: 18px;
+            font-weight: 700;
+            color: #1a1a2e;
+        }
+        .modal-close {
+            background: none;
+            border: none;
+            font-size: 28px;
+            cursor: pointer;
+            color: #868e96;
+            transition: color 0.2s;
+            padding: 0 8px;
+        }
+        .modal-close:hover { color: #1a1a2e; }
+        .modal-body {
+            padding: 20px;
+            max-height: calc(90vh - 70px);
+            overflow-y: auto;
+        }
+        .modal-body .post-image-full {
+            width: 100%;
+            max-height: 400px;
+            object-fit: contain;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            background: #f8f9fa;
+        }
+        .modal-body .post-text-full {
+            font-size: 16px;
+            line-height: 1.8;
+            color: #2d3436;
+            margin-bottom: 16px;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .modal-body .post-text-full .hashtag { color: #667eea; font-weight: 500; }
+        .modal-body .post-meta-full {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+            padding-top: 16px;
+            border-top: 1px solid #e9ecef;
+            font-size: 13px;
+            color: #868e96;
+        }
+        .modal-body .post-actions-full {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid #e9ecef;
+        }
+        .modal-body .post-actions-full .btn { flex: 1; justify-content: center; min-width: 100px; }
         
         .loading-state { grid-column: 1/-1; text-align: center; padding: 60px 20px; }
         .loading-state .loader { width: 40px; height: 40px; border: 3px solid #f1f3f5; border-top-color: #667eea; border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 16px; }
@@ -700,17 +812,61 @@ DASHBOARD_HTML = r'''
         .footer { text-align: center; padding: 20px 32px; color: #adb5bd; font-size: 13px; border-top: 1px solid #e9ecef; background: #ffffff; }
         .footer span { color: #667eea; }
         
+        /* Sources Dropdown */
+        .sources-dropdown { position: relative; display: inline-block; }
+        .sources-dropdown-content {
+            display: none;
+            position: absolute;
+            top: 100%;
+            right: 0;
+            background: #ffffff;
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            padding: 12px;
+            min-width: 280px;
+            max-height: 350px;
+            overflow-y: auto;
+            z-index: 100;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+        }
+        .sources-dropdown-content.active { display: block; }
+        .sources-dropdown-content .source-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 0;
+            border-bottom: 1px solid #f1f3f5;
+            font-size: 13px;
+        }
+        .sources-dropdown-content .source-item:last-child { border-bottom: none; }
+        .sources-dropdown-content .source-item .cat {
+            background: #f0f2f5;
+            padding: 1px 8px;
+            border-radius: 10px;
+            font-size: 10px;
+        }
+        .sources-dropdown-content .source-item .prio {
+            background: #667eea;
+            color: white;
+            padding: 1px 8px;
+            border-radius: 10px;
+            font-size: 10px;
+        }
+        
         @media (max-width: 768px) {
             .header { padding: 12px 16px; }
-            .header-content { flex-direction: column; align-items: stretch; }
+            .header-content { flex-direction: column; align-items: stretch; gap: 10px; }
             .header-left { justify-content: space-between; }
             .logo h1 { font-size: 18px; }
-            .header-right { flex-direction: column; align-items: stretch; gap: 12px; }
+            .header-right { flex-direction: column; align-items: stretch; gap: 10px; }
             .header-stats { justify-content: space-around; }
-            .stats-grid { grid-template-columns: repeat(2, 1fr); padding: 16px; }
-            .tabs { flex-direction: column; margin: 12px 16px; }
+            .stats-grid { grid-template-columns: repeat(2, 1fr); padding: 12px 16px 0; gap: 10px; }
+            .stat-card { padding: 14px 16px; }
+            .stat-card .value { font-size: 20px; }
+            .tabs { flex-direction: row; margin: 12px 16px; overflow-x: auto; padding: 4px; gap: 4px; }
+            .tab-btn { padding: 8px 16px; font-size: 13px; flex: none; }
             .tab-content { padding: 12px 16px; }
-            .posts-grid { grid-template-columns: 1fr; }
+            .posts-grid { grid-template-columns: 1fr; gap: 16px; }
             .form-row { grid-template-columns: 1fr; }
             .queue-item { flex-direction: column; align-items: stretch; }
             .queue-item .actions { justify-content: stretch; }
@@ -719,11 +875,35 @@ DASHBOARD_HTML = r'''
             .toast { min-width: auto; font-size: 13px; padding: 12px 16px; }
             .info-box { flex-direction: column; text-align: center; }
             .btn-remove { width: 24px; height: 24px; font-size: 14px; top: 8px; right: 8px; }
+            .modal { max-width: 100%; margin: 10px; max-height: 95vh; }
+            .modal-body { padding: 16px; }
+            .modal-body .post-text-full { font-size: 15px; }
+            .sources-dropdown-content { position: fixed; top: auto; bottom: 0; left: 0; right: 0; max-height: 60vh; border-radius: 16px 16px 0 0; }
+        }
+        @media (max-width: 480px) {
+            .stat-card .value { font-size: 17px; }
+            .stat-card .icon { font-size: 18px; }
+            .post-text { font-size: 13px; -webkit-line-clamp: 4; }
+            .btn { font-size: 12px; padding: 8px 14px; }
+            .modal-body .post-text-full { font-size: 14px; }
         }
     </style>
 </head>
 <body>
     <div class="toast-container" id="toastContainer"></div>
+    
+    <!-- FULL POST VIEW MODAL -->
+    <div class="modal-overlay" id="postModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2 id="modalTitle">📄 Post Details</h2>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <div id="modalContent">Loading...</div>
+            </div>
+        </div>
+    </div>
     
     <header class="header">
         <div class="header-content">
@@ -734,6 +914,7 @@ DASHBOARD_HTML = r'''
                 </div>
                 <span class="badge live">● LIVE</span>
                 <span class="badge" id="cacheBadge">Loading...</span>
+                <span class="badge sources" id="sourcesBadge" onclick="toggleSourcesDropdown()">📡 Loading...</span>
             </div>
             <div class="header-right">
                 <div class="header-stats">
@@ -751,6 +932,14 @@ DASHBOARD_HTML = r'''
                     </div>
                 </div>
                 <div class="btn-group">
+                    <div class="sources-dropdown">
+                        <button class="btn btn-secondary" onclick="toggleSourcesDropdown()" style="font-size:12px;padding:6px 12px;">
+                            📋 Sources ▼
+                        </button>
+                        <div class="sources-dropdown-content" id="sourcesDropdown">
+                            <div id="sourcesList">Loading...</div>
+                        </div>
+                    </div>
                     <button class="btn btn-secondary" onclick="clearCache()">🗑️ Clear</button>
                     <button class="btn btn-primary" id="refreshBtn" onclick="fetchPosts()">
                         <span class="spinner">⟳</span>
@@ -813,12 +1002,10 @@ DASHBOARD_HTML = r'''
         <div class="schedule-form">
             <h2>📤 Post to Facebook Now</h2>
             <p class="subtitle">Post immediately to your Facebook page</p>
-            
             <div class="info-box">
                 <span class="label">📘 Posting to: <strong style="color:#1877f2;">Facebook Page</strong></span>
                 <span class="label">🆔 Profile ID: <strong style="color:#1877f2;" id="profileDisplay">Loading...</strong></span>
             </div>
-            
             <form id="postForm" onsubmit="submitPostNow(event)">
                 <div class="form-group">
                     <label>Post Content</label>
@@ -830,9 +1017,7 @@ DASHBOARD_HTML = r'''
                     <small style="color:#868e96;">Add one image URL or leave blank for text-only post</small>
                 </div>
                 <div class="form-actions">
-                    <button type="submit" class="btn btn-facebook">
-                        🚀 Post Now
-                    </button>
+                    <button type="submit" class="btn btn-facebook">🚀 Post Now</button>
                     <button type="reset" class="btn btn-secondary">Clear</button>
                 </div>
             </form>
@@ -845,12 +1030,10 @@ DASHBOARD_HTML = r'''
         <div class="schedule-form">
             <h2>📅 Schedule Post to Facebook</h2>
             <p class="subtitle">Schedule a post for a specific time</p>
-            
             <div class="info-box">
                 <span class="label">📘 Posting to: <strong style="color:#1877f2;">Facebook Page</strong></span>
                 <span class="label">🆔 Profile ID: <strong style="color:#1877f2;" id="scheduleProfileDisplay">Loading...</strong></span>
             </div>
-            
             <form id="scheduleForm" onsubmit="submitSchedule(event)">
                 <div class="form-group">
                     <label>Post Content</label>
@@ -860,9 +1043,7 @@ DASHBOARD_HTML = r'''
                     <div class="form-group">
                         <label>Scheduled Date & Time</label>
                         <input type="datetime-local" id="scheduleTime" required>
-                        <small style="color:#868e96;" id="timeHint">
-                            ⏰ Must be at least 5 minutes from now
-                        </small>
+                        <small style="color:#868e96;" id="timeHint">⏰ Must be at least 5 minutes from now</small>
                     </div>
                     <div class="form-group">
                         <label>Image URL (Optional)</label>
@@ -870,9 +1051,7 @@ DASHBOARD_HTML = r'''
                     </div>
                 </div>
                 <div class="form-actions">
-                    <button type="submit" class="btn btn-warning">
-                        📅 Schedule Post
-                    </button>
+                    <button type="submit" class="btn btn-warning">📅 Schedule Post</button>
                     <button type="reset" class="btn btn-secondary">Clear</button>
                 </div>
             </form>
@@ -904,13 +1083,11 @@ DASHBOARD_HTML = r'''
             duration = duration || 4000;
             const container = document.getElementById('toastContainer');
             const icons = { success: '✅', error: '❌', warning: '⚠️', info: 'ℹ️' };
-            
             const toast = document.createElement('div');
             toast.className = 'toast ' + type;
             toast.innerHTML = '<span class="icon">' + (icons[type] || 'ℹ️') + '</span>' +
                 '<span class="msg">' + message + '</span>' +
                 '<span class="close" onclick="this.parentElement.remove()">✕</span>';
-            
             container.appendChild(toast);
             setTimeout(function() {
                 if (toast.parentElement) {
@@ -922,29 +1099,69 @@ DASHBOARD_HTML = r'''
         }
         
         // ============================================================
+        // FULL POST VIEW MODAL
+        // ============================================================
+        function openModal(postId) {
+            const post = allPosts.find(function(p) { return p.id === postId; });
+            if (!post) { showToast('❌ Post not found', 'error'); return; }
+            
+            const modal = document.getElementById('postModal');
+            const content = document.getElementById('modalContent');
+            
+            let html = '';
+            if (post.images && post.images.length > 0) {
+                html += '<img src="' + post.images[0] + '" alt="Post image" class="post-image-full" loading="lazy" onerror="this.style.display=\'none\'">';
+            }
+            let displayText = post.text || '(No text content)';
+            displayText = displayText.replace(/#([a-zA-Z0-9_]+)/g, '<span class="hashtag">#$1</span>');
+            html += '<div class="post-text-full">' + displayText + '</div>';
+            html += '<div class="post-meta-full">';
+            html += '<span>📌 ' + (post.source_name || 'Unknown') + '</span>';
+            html += '<span>🕐 ' + (post.time || 'N/A') + '</span>';
+            html += '</div>';
+            html += '<div class="post-actions-full">';
+            html += '<button class="btn btn-download" onclick="downloadPostAsJpg(\'' + post.id + '\'); closeModal();">🖼️ Download JPG</button>';
+            html += '<button class="btn btn-action post-now" onclick="loadPostForPostNow(\'' + post.id + '\'); closeModal();">📤 Post Now</button>';
+            html += '<button class="btn btn-action schedule" onclick="loadPostForSchedule(\'' + post.id + '\'); closeModal();">📅 Schedule</button>';
+            html += '<button class="btn btn-secondary" style="background:#dc3545;color:white;" onclick="removePostFromFeed(\'' + post.id + '\'); closeModal();">🗑️ Remove</button>';
+            html += '</div>';
+            
+            content.innerHTML = html;
+            document.getElementById('modalTitle').textContent = '📄 Post from ' + (post.source_name || 'Unknown');
+            modal.classList.add('active');
+            document.body.style.overflow = 'hidden';
+        }
+        
+        function closeModal() {
+            document.getElementById('postModal').classList.remove('active');
+            document.body.style.overflow = '';
+        }
+        // Close modal on overlay click
+        document.getElementById('postModal').addEventListener('click', function(e) {
+            if (e.target === this) closeModal();
+        });
+        // Close modal on Escape key
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') closeModal();
+        });
+        
+        // ============================================================
         // REMOVE POST FROM FEED (PERSISTENT - SAVES TO REDIS)
         // ============================================================
         async function removePostFromFeed(postId) {
             if (!confirm('Remove this post from the feed permanently?')) return;
-            
             try {
                 const response = await fetch('/api/post/remove', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ post_id: postId })
                 });
-                
                 const data = await response.json();
-                
                 if (data.success) {
-                    // Remove from allPosts array
                     allPosts = allPosts.filter(function(p) { return p.id !== postId; });
-                    
-                    // Re-render the feed
                     renderPosts(allPosts);
                     updateStats(allPosts);
                     updateFilters(allPosts);
-                    
                     showToast('🗑️ Post removed from feed permanently', 'success');
                 } else {
                     throw new Error(data.error || 'Failed to remove');
@@ -961,67 +1178,105 @@ DASHBOARD_HTML = r'''
             const selectedDate = new Date(scheduledTime);
             const now = new Date();
             const minTime = new Date(now.getTime() + 5 * 60000);
-            
             if (selectedDate < minTime) {
                 const minTimeStr = minTime.toLocaleTimeString();
-                return {
-                    valid: false,
-                    message: `⏰ Scheduled time must be at least 5 minutes from now.\nMinimum time: ${minTimeStr}`
-                };
+                return { valid: false, message: '⏰ Scheduled time must be at least 5 minutes from now.\nMinimum time: ' + minTimeStr };
             }
             return { valid: true };
         }
         
+        function setDefaultScheduleTime() {
+            const now = new Date();
+            const defaultTime = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+            defaultTime.setMinutes(Math.ceil(defaultTime.getMinutes() / 15) * 15);
+            defaultTime.setSeconds(0);
+            defaultTime.setMilliseconds(0);
+            const year = defaultTime.getFullYear();
+            const month = String(defaultTime.getMonth() + 1).padStart(2, '0');
+            const day = String(defaultTime.getDate()).padStart(2, '0');
+            const hours = String(defaultTime.getHours()).padStart(2, '0');
+            const minutes = String(defaultTime.getMinutes()).padStart(2, '0');
+            document.getElementById('scheduleTime').value = year + '-' + month + '-' + day + 'T' + hours + ':' + minutes;
+        }
         
+        function updateTimeHint() {
+            const now = new Date();
+            const minTime = new Date(now.getTime() + 5 * 60000);
+            let hours = minTime.getHours();
+            const ampm = hours >= 12 ? 'PM' : 'AM';
+            hours = hours % 12;
+            hours = hours ? hours : 12;
+            const minutes = String(minTime.getMinutes()).padStart(2, '0');
+            const hint = document.getElementById('timeHint');
+            if (hint) {
+                hint.textContent = '⏰ Must be at least 5 minutes from now (minimum: ' + hours + ':' + minutes + ' ' + ampm + ')';
+                hint.style.color = '#6c757d';
+            }
+        }
         
+        // ============================================================
+        // SOURCES DROPDOWN
+        // ============================================================
+        async function loadSourcesInfo() {
+            try {
+                const response = await fetch('/api/sources');
+                const data = await response.json();
+                if (data.success) {
+                    document.getElementById('sourcesBadge').textContent = '📡 ' + data.count + ' sources';
+                    document.getElementById('sourceCount').textContent = data.count;
+                    window.sourcesData = data;
+                }
+            } catch (e) {
+                document.getElementById('sourcesBadge').textContent = '📡 Error';
+            }
+        }
         
-        
-function setDefaultScheduleTime() {
-    const now = new Date();
-    // Set to 2 hours from now
-    const defaultTime = new Date(now.getTime() + 2 * 60 * 60 * 1000);
-    // Round to nearest 15 minutes
-    defaultTime.setMinutes(Math.ceil(defaultTime.getMinutes() / 15) * 15);
-    defaultTime.setSeconds(0);
-    defaultTime.setMilliseconds(0);
-    
-    // Format as YYYY-MM-DDTHH:mm (24-hour format for input value)
-    const year = defaultTime.getFullYear();
-    const month = String(defaultTime.getMonth() + 1).padStart(2, '0');
-    const day = String(defaultTime.getDate()).padStart(2, '0');
-    const hours = String(defaultTime.getHours()).padStart(2, '0');
-    const minutes = String(defaultTime.getMinutes()).padStart(2, '0');
-    
-    const formatted = `${year}-${month}-${day}T${hours}:${minutes}`;
-    document.getElementById('scheduleTime').value = formatted;
-}
-        
-        
-        
-        
-        
-        
-        
-        
-        
-function updateTimeHint() {
-    const now = new Date();
-    const minTime = new Date(now.getTime() + 5 * 60000);
-    
-    // Format in 12-hour AM/PM
-    let hours = minTime.getHours();
-    const ampm = hours >= 12 ? 'PM' : 'AM';
-    hours = hours % 12;
-    hours = hours ? hours : 12;
-    const minutes = String(minTime.getMinutes()).padStart(2, '0');
-    const minTimeStr = `${hours}:${minutes} ${ampm}`;
-    
-    const hint = document.getElementById('timeHint');
-    if (hint) {
-        hint.textContent = `⏰ Must be at least 5 minutes from now (minimum: ${minTimeStr})`;
-        hint.style.color = '#6c757d';
-    }
-}
+        async function toggleSourcesDropdown() {
+            const dropdown = document.getElementById('sourcesDropdown');
+            if (dropdown.classList.contains('active')) {
+                dropdown.classList.remove('active');
+                return;
+            }
+            try {
+                let data = window.sourcesData;
+                if (!data) {
+                    const response = await fetch('/api/sources');
+                    data = await response.json();
+                }
+                if (data.success) {
+                    let html = '<div style="font-weight:600;margin-bottom:8px;color:#1a1a2e;">📡 Configured Sources</div>';
+                    html += '<div style="font-size:11px;color:#868e96;margin-bottom:8px;">Priority order (lower = higher)</div>';
+                    const sorted = [...data.sources].sort((a, b) => (a.priority || 999) - (b.priority || 999));
+                    sorted.forEach(function(s) {
+                        html += '<div class="source-item">';
+                        html += '<span>' + (s.name || s.id) + '</span>';
+                        html += '<span><span class="cat">' + (s.category || 'General') + '</span> <span class="prio">#' + (s.priority || 'N/A') + '</span></span>';
+                        html += '</div>';
+                    });
+                    const summary = data.summary || {};
+                    const categories = summary.categories || {};
+                    if (Object.keys(categories).length > 0) {
+                        html += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid #e9ecef;font-size:11px;color:#868e96;">';
+                        html += '📂 Categories: ' + Object.entries(categories).map(function(kv) { return kv[0] + ' (' + kv[1] + ')'; }).join(', ');
+                        html += '</div>';
+                    }
+                    html += '<div style="margin-top:4px;font-size:11px;color:#868e96;">📊 Total: ' + data.count + ' sources</div>';
+                    document.getElementById('sourcesList').innerHTML = html;
+                    dropdown.classList.add('active');
+                }
+            } catch (e) {
+                document.getElementById('sourcesList').innerHTML = '❌ Error loading sources';
+                dropdown.classList.add('active');
+            }
+        }
+        // Close dropdown when clicking outside
+        document.addEventListener('click', function(e) {
+            const dropdown = document.getElementById('sourcesDropdown');
+            const btn = e.target.closest('.sources-dropdown') || e.target.closest('#sourcesBadge');
+            if (!btn && dropdown) {
+                dropdown.classList.remove('active');
+            }
+        });
         
         // ============================================================
         // TAB SWITCHING
@@ -1051,33 +1306,24 @@ function updateTimeHint() {
             if (post.images && post.images.length > 0) {
                 try {
                     showToast('🖼️ Downloading image...', 'info');
-                    
                     const response = await fetch('/api/download/single-image', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            image_url: post.images[0],
-                            filename: `post_${postId}_${new Date().toISOString().slice(0,10)}`
-                        })
+                        body: JSON.stringify({ image_url: post.images[0], filename: 'post_' + postId + '_' + new Date().toISOString().slice(0,10) })
                     });
-                    
                     if (response.ok) {
                         const blob = await response.blob();
                         const url = URL.createObjectURL(blob);
                         const a = document.createElement('a');
                         a.href = url;
-                        const contentDisposition = response.headers.get('content-disposition');
-                        let filename = `post_${postId}_${new Date().toISOString().slice(0,10)}.jpg`;
-                        if (contentDisposition) {
-                            const match = contentDisposition.match(/filename="?([^"]+)"?/);
-                            if (match) filename = match[1];
-                        }
+                        let filename = 'post_' + postId + '_' + new Date().toISOString().slice(0,10) + '.jpg';
+                        const cd = response.headers.get('content-disposition');
+                        if (cd) { const m = cd.match(/filename="?([^"]+)"?/); if (m) filename = m[1]; }
                         a.download = filename;
                         document.body.appendChild(a);
                         a.click();
                         document.body.removeChild(a);
                         URL.revokeObjectURL(url);
-                        
                         showToast('✅ Image downloaded!', 'success');
                     } else {
                         throw new Error('Failed to download image');
@@ -1094,30 +1340,23 @@ function updateTimeHint() {
         async function downloadPostAsJpgFallback(postId) {
             const post = allPosts.find(function(p) { return p.id === postId; });
             if (!post) { showToast('❌ Post not found', 'error'); return; }
-            
             try {
                 showToast('🖼️ Generating image...', 'info');
-                
                 const response = await fetch('/api/download/jpg', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        text: post.text || 'No text content',
-                        source: post.source_name || 'Unknown'
-                    })
+                    body: JSON.stringify({ text: post.text || 'No text content', source: post.source_name || 'Unknown' })
                 });
-                
                 if (response.ok) {
                     const blob = await response.blob();
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = `post_${postId}_${new Date().toISOString().slice(0,10)}.jpg`;
+                    a.download = 'post_' + postId + '_' + new Date().toISOString().slice(0,10) + '.jpg';
                     document.body.appendChild(a);
                     a.click();
                     document.body.removeChild(a);
                     URL.revokeObjectURL(url);
-                    
                     showToast('✅ Downloaded as JPG!', 'success');
                 } else {
                     throw new Error('Failed to generate image');
@@ -1131,29 +1370,19 @@ function updateTimeHint() {
         function downloadPostAsText(postId) {
             const post = allPosts.find(function(p) { return p.id === postId; });
             if (!post) { showToast('❌ Post not found', 'error'); return; }
-            
             let content = '';
-            content += '='.repeat(60) + '\n';
-            content += '📱 SOCIAL POST DOWNLOAD\n';
-            content += '='.repeat(60) + '\n\n';
+            content += '='.repeat(60) + '\n📱 SOCIAL POST DOWNLOAD\n' + '='.repeat(60) + '\n\n';
             content += '📌 SOURCE: ' + (post.source_name || 'Unknown') + '\n';
             content += '🕐 TIME: ' + (post.time || 'N/A') + '\n';
             content += '🔗 LINK: ' + (post.post_link || 'N/A') + '\n\n';
-            content += '-'.repeat(60) + '\n\n';
-            content += '📝 CONTENT:\n';
+            content += '-'.repeat(60) + '\n\n📝 CONTENT:\n';
             content += post.text || '(No text content)';
             content += '\n\n';
             if (post.images && post.images.length > 0) {
-                content += '-'.repeat(60) + '\n';
-                content += '🖼️ IMAGES:\n';
-                post.images.forEach(function(img, i) {
-                    content += '  ' + (i+1) + '. ' + img + '\n';
-                });
+                content += '-'.repeat(60) + '\n🖼️ IMAGES:\n';
+                post.images.forEach(function(img, i) { content += '  ' + (i+1) + '. ' + img + '\n'; });
             }
-            content += '\n' + '='.repeat(60) + '\n';
-            content += '📅 Downloaded: ' + new Date().toLocaleString() + '\n';
-            content += '='.repeat(60);
-            
+            content += '\n' + '='.repeat(60) + '\n📅 Downloaded: ' + new Date().toLocaleString() + '\n' + '='.repeat(60);
             const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
@@ -1163,7 +1392,6 @@ function updateTimeHint() {
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
-            
             showToast('✅ Downloaded as text (fallback)', 'info');
         }
         
@@ -1173,19 +1401,15 @@ function updateTimeHint() {
         async function fetchPosts() {
             if (isLoading) return;
             isLoading = true;
-            
             const btn = document.getElementById('refreshBtn');
             btn.classList.add('loading');
             btn.disabled = true;
-            
             const grid = document.getElementById('postsGrid');
             grid.innerHTML = '<div class="loading-state"><div class="loader"></div><p>📡 Fetching latest posts...</p></div>';
-            
             try {
                 showToast('🔄 Fetching fresh posts...', 'info');
                 const response = await fetch('/api/posts?limit=9');
                 const data = await response.json();
-                
                 if (data.success) {
                     allPosts = data.posts || [];
                     renderPosts(allPosts);
@@ -1220,7 +1444,6 @@ function updateTimeHint() {
                     grid.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><h3>Failed to Load</h3><p>' + error.message + '</p></div>';
                 }
             }
-            
             btn.classList.remove('loading');
             btn.disabled = false;
             isLoading = false;
@@ -1247,18 +1470,9 @@ function updateTimeHint() {
                     document.getElementById('cacheBadge').style.background = '#e9ecef';
                     document.getElementById('cacheBadge').style.color = '#495057';
                     const grid = document.getElementById('postsGrid');
-                    grid.innerHTML = `
-                        <div class="empty-state">
-                            <div class="icon">📭</div>
-                            <h3>No Posts Loaded</h3>
-                            <p>Click the "Fetch Posts" button above to load content</p>
-                            <button class="btn btn-primary" onclick="fetchPosts()" style="margin-top:20px;padding:12px 32px;font-size:16px;">🚀 Fetch Posts Now</button>
-                        </div>
-                    `;
+                    grid.innerHTML = '<div class="empty-state"><div class="icon">📭</div><h3>No Posts Loaded</h3><p>Click the "Fetch Posts" button above to load content</p><button class="btn btn-primary" onclick="fetchPosts()" style="margin-top:20px;padding:12px 32px;font-size:16px;">🚀 Fetch Posts Now</button></div>';
                 }
-            } catch (e) {
-                console.error('Error loading cache:', e);
-            }
+            } catch (e) { console.error('Error loading cache:', e); }
         }
         
         // ============================================================
@@ -1285,7 +1499,7 @@ function updateTimeHint() {
         }
         
         // ============================================================
-        // RENDER POSTS - WITH REMOVE BUTTON
+        // RENDER POSTS - WITH REMOVE BUTTON & CLICK TO VIEW
         // ============================================================
         function renderPosts(posts) {
             const grid = document.getElementById('postsGrid');
@@ -1308,12 +1522,11 @@ function updateTimeHint() {
                 const isQuote = post.text && post.text.length < 200 && post.text.length > 10;
                 const sourceName = post.source_name || 'Unknown';
                 const sourceInitial = sourceName.charAt(0).toUpperCase();
-                
                 let displayText = post.text || '';
                 if (displayText.length > 300) displayText = displayText.substring(0, 300) + '...';
                 displayText = displayText.replace(/#([a-zA-Z0-9_]+)/g, '<span class="hashtag">#$1</span>');
                 
-                html += '<div class="post-card" style="animation-delay: ' + ((index % 9) * 0.03) + 's">';
+                html += '<div class="post-card" onclick="openModal(\'' + post.id + '\')" style="animation-delay: ' + ((index % 9) * 0.03) + 's">';
                 html += '<div class="post-image-wrap">';
                 if (hasImage) {
                     html += '<img src="' + post.images[0] + '" alt="Post image" loading="lazy" onerror="this.parentElement.innerHTML=\'<div class=\\\'no-image\\\'>📄</div>\'">';
@@ -1325,8 +1538,7 @@ function updateTimeHint() {
                 }
                 html += '<span class="post-source-tag">' + sourceInitial + ' ' + sourceName + '</span>';
                 html += '<span class="post-status-badge">Available</span>';
-                // Remove button (X)
-                html += '<button class="btn-remove" onclick="removePostFromFeed(\'' + post.id + '\')" title="Remove from feed">✕</button>';
+                html += '<button class="btn-remove" onclick="event.stopPropagation(); removePostFromFeed(\'' + post.id + '\')" title="Remove from feed">✕</button>';
                 html += '</div>';
                 html += '<div class="post-content">';
                 if (displayText) {
@@ -1335,9 +1547,9 @@ function updateTimeHint() {
                 html += '<div class="post-meta">';
                 html += '<span class="post-time">' + (post.time || 'N/A') + '</span>';
                 html += '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
-                html += '<button class="btn-download" data-post-id="' + post.id + '" onclick="downloadPostAsJpg(\'' + post.id + '\')">🖼️ Download JPG</button>';
-                html += '<button class="btn-action post-now" onclick="loadPostForPostNow(\'' + post.id + '\')">📤 Post Now</button>';
-                html += '<button class="btn-action schedule" onclick="loadPostForSchedule(\'' + post.id + '\')">📅 Schedule</button>';
+                html += '<button class="btn-download" onclick="event.stopPropagation(); downloadPostAsJpg(\'' + post.id + '\')">🖼️ Download JPG</button>';
+                html += '<button class="btn-action post-now" onclick="event.stopPropagation(); loadPostForPostNow(\'' + post.id + '\')">📤 Post Now</button>';
+                html += '<button class="btn-action schedule" onclick="event.stopPropagation(); loadPostForSchedule(\'' + post.id + '\')">📅 Schedule</button>';
                 html += '</div>';
                 html += '</div></div></div>';
             });
@@ -1363,7 +1575,6 @@ function updateTimeHint() {
             const withImages = posts.filter(function(p) { return p.images && p.images.length > 0; }).length;
             const quotes = posts.filter(function(p) { return p.text && p.text.length < 200 && p.text.length > 10; }).length;
             const sources = new Set(posts.map(function(p) { return p.source_name; }));
-            
             document.getElementById('totalPosts').textContent = total;
             document.getElementById('totalImages').textContent = withImages;
             document.getElementById('totalQuotes').textContent = quotes;
@@ -1397,9 +1608,7 @@ function updateTimeHint() {
                     document.getElementById('profileDisplay').textContent = profileId;
                     document.getElementById('scheduleProfileDisplay').textContent = profileId;
                 }
-            } catch (e) {
-                console.error('Error loading profile:', e);
-            }
+            } catch (e) { console.error('Error loading profile:', e); }
         }
         
         // ============================================================
@@ -1408,130 +1617,83 @@ function updateTimeHint() {
         function loadPostForPostNow(postId) {
             const post = allPosts.find(function(p) { return p.id === postId; });
             if (!post) { showToast('❌ Post not found', 'error'); return; }
-            
             document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
             document.querySelector('[data-tab="post"]').classList.add('active');
             document.querySelectorAll('.tab-content').forEach(function(tc) { tc.classList.remove('active'); });
             document.getElementById('tab-post').classList.add('active');
-            
             document.getElementById('postContent').value = post.text || '';
             document.getElementById('postForm').dataset.postId = postId;
-            
             if (post.images && post.images.length > 0) {
                 document.getElementById('postMedia').value = post.images[0];
-                showToast(`📝 Loaded with ${post.images.length} image(s)`, 'info');
+                showToast('📝 Loaded with ' + post.images.length + ' image(s)', 'info');
             } else {
                 document.getElementById('postMedia').value = '';
                 showToast('📝 Loaded (no images)', 'info');
             }
-            
             loadProfileId();
         }
         
         // ============================================================
         // LOAD POST FOR SCHEDULE
         // ============================================================
-        
-        
-        
-function loadPostForSchedule(postId) {
-    const post = allPosts.find(function(p) { return p.id === postId; });
-    if (!post) { showToast('❌ Post not found', 'error'); return; }
-    
-    document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
-    document.querySelector('[data-tab="schedule"]').classList.add('active');
-    document.querySelectorAll('.tab-content').forEach(function(tc) { tc.classList.remove('active'); });
-    document.getElementById('tab-schedule').classList.add('active');
-    
-    document.getElementById('scheduleContent').value = post.text || '';
-    document.getElementById('scheduleForm').dataset.postId = postId;
-    
-    if (post.images && post.images.length > 0) {
-        document.getElementById('scheduleMedia').value = post.images[0];
-        showToast(`📝 Loaded with ${post.images.length} image(s)`, 'info');
-    } else {
-        document.getElementById('scheduleMedia').value = '';
-        showToast('📝 Loaded (no images)', 'info');
-    }
-    
-    // Set default time in 12-hour format
-    setDefaultScheduleTime();
-    updateTimeHint();
-    loadProfileId();
-}
-        
-        
-        
-        
-        
-        
-        
-        
-        
+        function loadPostForSchedule(postId) {
+            const post = allPosts.find(function(p) { return p.id === postId; });
+            if (!post) { showToast('❌ Post not found', 'error'); return; }
+            document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+            document.querySelector('[data-tab="schedule"]').classList.add('active');
+            document.querySelectorAll('.tab-content').forEach(function(tc) { tc.classList.remove('active'); });
+            document.getElementById('tab-schedule').classList.add('active');
+            document.getElementById('scheduleContent').value = post.text || '';
+            document.getElementById('scheduleForm').dataset.postId = postId;
+            if (post.images && post.images.length > 0) {
+                document.getElementById('scheduleMedia').value = post.images[0];
+                showToast('📝 Loaded with ' + post.images.length + ' image(s)', 'info');
+            } else {
+                document.getElementById('scheduleMedia').value = '';
+                showToast('📝 Loaded (no images)', 'info');
+            }
+            setDefaultScheduleTime();
+            updateTimeHint();
+            loadProfileId();
+        }
         
         // ============================================================
         // SUBMIT POST NOW - WITH REMOVE FROM FEED
         // ============================================================
         async function submitPostNow(e) {
             e.preventDefault();
-            
             const content = document.getElementById('postContent').value;
             const mediaUrl = document.getElementById('postMedia').value;
             const postId = document.getElementById('postForm').dataset.postId || null;
-            
             if (!content) { showToast('❌ Please enter post content', 'error'); return; }
-            
             try {
                 showToast('🚀 Posting to Facebook...', 'info');
                 const submitBtn = document.querySelector('#postForm button[type="submit"]');
                 submitBtn.disabled = true;
                 submitBtn.innerHTML = '⏳ Posting...';
-                
                 const response = await fetch('/api/post/now', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        content: content,
-                        image_url: mediaUrl || null,
-                        image_urls: mediaUrl ? [mediaUrl] : [],
-                        post_id: postId
-                    })
+                    body: JSON.stringify({ content: content, image_url: mediaUrl || null, image_urls: mediaUrl ? [mediaUrl] : [], post_id: postId })
                 });
-                
                 const data = await response.json();
                 if (data.success) {
                     showToast('✅ Posted to Facebook successfully!', 'success');
                     document.getElementById('postForm').reset();
                     document.getElementById('postForm').dataset.postId = '';
-                    document.getElementById('postResult').innerHTML = `
-                        <div style="background:#e8f5e9;border:1px solid #28a745;border-radius:8px;padding:16px;margin-top:16px;">
-                            <strong>✅ Posted Successfully!</strong><br>
-                            📝 ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}<br>
-                            ${mediaUrl ? '🖼️ With image<br>' : ''}
-                            🆔 Post ID: ${data.post_id}<br>
-                            🔗 <a href="${data.url}" target="_blank">View Post</a>
-                        </div>
-                    `;
+                    document.getElementById('postResult').innerHTML = '<div style="background:#e8f5e9;border:1px solid #28a745;border-radius:8px;padding:16px;margin-top:16px;"><strong>✅ Posted Successfully!</strong><br>📝 ' + content.substring(0, 100) + (content.length > 100 ? '...' : '') + '<br>' + (mediaUrl ? '🖼️ With image<br>' : '') + '🆔 Post ID: ' + data.post_id + '<br>🔗 <a href="' + data.url + '" target="_blank">View Post</a></div>';
                     loadHistory();
-                    
-                    // REMOVE POST FROM FEED WITHOUT REFETCHING
                     allPosts = allPosts.filter(function(p) { return p.id !== postId; });
                     renderPosts(allPosts);
                     updateStats(allPosts);
                     updateFilters(allPosts);
-                    
                     showToast('✅ Post removed from feed', 'info');
                 } else {
                     throw new Error(data.error || 'Failed to post');
                 }
             } catch (error) {
                 showToast('❌ Error: ' + error.message, 'error');
-                document.getElementById('postResult').innerHTML = `
-                    <div style="background:#ffebee;border:1px solid #dc3545;border-radius:8px;padding:16px;margin-top:16px;">
-                        <strong>❌ Failed to Post</strong><br>
-                        ${error.message}
-                    </div>
-                `;
+                document.getElementById('postResult').innerHTML = '<div style="background:#ffebee;border:1px solid #dc3545;border-radius:8px;padding:16px;margin-top:16px;"><strong>❌ Failed to Post</strong><br>' + error.message + '</div>';
             } finally {
                 const submitBtn = document.querySelector('#postForm button[type="submit"]');
                 submitBtn.disabled = false;
@@ -1542,129 +1704,64 @@ function loadPostForSchedule(postId) {
         // ============================================================
         // SUBMIT SCHEDULE - WITH REMOVE FROM FEED
         // ============================================================
-        
-        
-        
-        
-async function submitSchedule(e) {
-    e.preventDefault();
-    
-    const content = document.getElementById('scheduleContent').value;
-    const scheduledTime = document.getElementById('scheduleTime').value;
-    const mediaUrl = document.getElementById('scheduleMedia').value;
-    const postId = document.getElementById('scheduleForm').dataset.postId || null;
-    
-    if (!content) { 
-        showToast('❌ Please enter post content', 'error'); 
-        return; 
-    }
-    if (!scheduledTime) { 
-        showToast('❌ Please select a date and time', 'error'); 
-        return; 
-    }
-    
-    // Validate time (5+ minutes from now)
-    const selectedDate = new Date(scheduledTime);
-    const now = new Date();
-    const minTime = new Date(now.getTime() + 5 * 60000);
-    
-    if (selectedDate < minTime) {
-        showToast('⏰ Scheduled time must be at least 5 minutes from now', 'error', 5000);
-        document.getElementById('scheduleTime').style.borderColor = '#dc3545';
-        setTimeout(() => {
-            document.getElementById('scheduleTime').style.borderColor = '';
-        }, 3000);
-        return;
-    }
-    
-    try {
-        showToast('📅 Scheduling post...', 'info');
-        const submitBtn = document.querySelector('#scheduleForm button[type="submit"]');
-        submitBtn.disabled = true;
-        submitBtn.innerHTML = '⏳ Scheduling...';
-        
-        // Convert local time to UTC ISO format
-        const utcDate = new Date(selectedDate.getTime() - (selectedDate.getTimezoneOffset() * 60000));
-        const scheduledIso = utcDate.toISOString();
-        
-        const response = await fetch('/api/post/schedule', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                content: content,
-                scheduled_time: scheduledIso,
-                image_urls: mediaUrl ? [mediaUrl] : [],
-                post_id: postId
-            })
-        });
-        
-        const data = await response.json();
-        if (data.success) {
-            // Format the display time in 12-hour format
-            const displayTime = selectedDate.toLocaleString('en-US', {
-                year: 'numeric',
-                month: 'short',
-                day: 'numeric',
-                hour: 'numeric',
-                minute: '2-digit',
-                hour12: true
-            });
-            
-            showToast(`✅ Scheduled for ${displayTime}`, 'success');
-            document.getElementById('scheduleForm').reset();
-            document.getElementById('scheduleForm').dataset.postId = '';
-            document.getElementById('scheduleResult').innerHTML = `
-                <div style="background:#e8f5e9;border:1px solid #28a745;border-radius:8px;padding:16px;margin-top:16px;">
-                    <strong>✅ Scheduled Successfully!</strong><br>
-                    📝 ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}<br>
-                    ${mediaUrl ? '🖼️ With image<br>' : ''}
-                    🕐 Scheduled for: ${displayTime}<br>
-                    🆔 Post ID: ${data.post_id || 'scheduled'}
-                </div>
-            `;
-            loadHistory();
-            
-            // REMOVE POST FROM FEED WITHOUT REFETCHING
-            allPosts = allPosts.filter(function(p) { return p.id !== postId; });
-            renderPosts(allPosts);
-            updateStats(allPosts);
-            updateFilters(allPosts);
-            
-            showToast('✅ Post removed from feed', 'info');
-        } else {
-            if (data.error && (data.error.includes('409') || data.error.includes('already scheduled'))) {
-                showToast('⚠️ This content was already scheduled recently. Please use different content.', 'warning', 5000);
-            } else {
-                throw new Error(data.error || 'Failed to schedule');
+        async function submitSchedule(e) {
+            e.preventDefault();
+            const content = document.getElementById('scheduleContent').value;
+            const scheduledTime = document.getElementById('scheduleTime').value;
+            const mediaUrl = document.getElementById('scheduleMedia').value;
+            const postId = document.getElementById('scheduleForm').dataset.postId || null;
+            if (!content) { showToast('❌ Please enter post content', 'error'); return; }
+            if (!scheduledTime) { showToast('❌ Please select a date and time', 'error'); return; }
+            const selectedDate = new Date(scheduledTime);
+            const now = new Date();
+            const minTime = new Date(now.getTime() + 5 * 60000);
+            if (selectedDate < minTime) {
+                showToast('⏰ Scheduled time must be at least 5 minutes from now', 'error', 5000);
+                document.getElementById('scheduleTime').style.borderColor = '#dc3545';
+                setTimeout(function() { document.getElementById('scheduleTime').style.borderColor = ''; }, 3000);
+                return;
+            }
+            try {
+                showToast('📅 Scheduling post...', 'info');
+                const submitBtn = document.querySelector('#scheduleForm button[type="submit"]');
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = '⏳ Scheduling...';
+                const utcDate = new Date(selectedDate.getTime() - (selectedDate.getTimezoneOffset() * 60000));
+                const scheduledIso = utcDate.toISOString();
+                const response = await fetch('/api/post/schedule', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content: content, scheduled_time: scheduledIso, image_urls: mediaUrl ? [mediaUrl] : [], post_id: postId })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    const displayTime = selectedDate.toLocaleString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+                    showToast('✅ Scheduled for ' + displayTime, 'success');
+                    document.getElementById('scheduleForm').reset();
+                    document.getElementById('scheduleForm').dataset.postId = '';
+                    document.getElementById('scheduleResult').innerHTML = '<div style="background:#e8f5e9;border:1px solid #28a745;border-radius:8px;padding:16px;margin-top:16px;"><strong>✅ Scheduled Successfully!</strong><br>📝 ' + content.substring(0, 100) + (content.length > 100 ? '...' : '') + '<br>' + (mediaUrl ? '🖼️ With image<br>' : '') + '🕐 Scheduled for: ' + displayTime + '<br>🆔 Post ID: ' + (data.post_id || 'scheduled') + '</div>';
+                    loadHistory();
+                    allPosts = allPosts.filter(function(p) { return p.id !== postId; });
+                    renderPosts(allPosts);
+                    updateStats(allPosts);
+                    updateFilters(allPosts);
+                    showToast('✅ Post removed from feed', 'info');
+                } else {
+                    if (data.error && (data.error.includes('409') || data.error.includes('already scheduled'))) {
+                        showToast('⚠️ This content was already scheduled recently. Please use different content.', 'warning', 5000);
+                    } else {
+                        throw new Error(data.error || 'Failed to schedule');
+                    }
+                }
+            } catch (error) {
+                showToast('❌ Error: ' + error.message, 'error');
+                document.getElementById('scheduleResult').innerHTML = '<div style="background:#ffebee;border:1px solid #dc3545;border-radius:8px;padding:16px;margin-top:16px;"><strong>❌ Failed to Schedule</strong><br>' + error.message + '</div>';
+            } finally {
+                const submitBtn = document.querySelector('#scheduleForm button[type="submit"]');
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '📅 Schedule Post';
             }
         }
-    } catch (error) {
-        showToast('❌ Error: ' + error.message, 'error');
-        document.getElementById('scheduleResult').innerHTML = `
-            <div style="background:#ffebee;border:1px solid #dc3545;border-radius:8px;padding:16px;margin-top:16px;">
-                <strong>❌ Failed to Schedule</strong><br>
-                ${error.message}
-            </div>
-        `;
-    } finally {
-        const submitBtn = document.querySelector('#scheduleForm button[type="submit"]');
-        submitBtn.disabled = false;
-        submitBtn.innerHTML = '📅 Schedule Post';
-    }
-}
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
         
         // ============================================================
         // LOAD HISTORY
@@ -1698,28 +1795,26 @@ async function submitSchedule(e) {
         // ============================================================
         // INITIALIZATION
         // ============================================================
-document.addEventListener('DOMContentLoaded', function() {
-    loadFromCacheOnStart();
-    loadHistory();
-    loadProfileId();
-    
-    // Set default schedule time
-    setDefaultScheduleTime();
-    updateTimeHint();
-    
-    document.querySelectorAll('.filter-btn').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            document.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.remove('active'); });
-            this.classList.add('active');
-            currentFilter = this.dataset.filter;
-            renderPosts(allPosts);
+        document.addEventListener('DOMContentLoaded', function() {
+            loadFromCacheOnStart();
+            loadHistory();
+            loadProfileId();
+            loadSourcesInfo();
+            setDefaultScheduleTime();
+            updateTimeHint();
+            document.querySelectorAll('.filter-btn').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    document.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.remove('active'); });
+                    this.classList.add('active');
+                    currentFilter = this.dataset.filter;
+                    renderPosts(allPosts);
+                });
+            });
         });
-    });
-});
         
         document.addEventListener('keydown', function(e) {
             if (e.key === 'r' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); fetchPosts(); }
-            if (e.key === 'Escape') { document.querySelectorAll('.toast').forEach(function(t) { t.remove(); }); }
+            if (e.key === 'Escape') { closeModal(); document.querySelectorAll('.toast').forEach(function(t) { t.remove(); }); }
         });
     </script>
 </body>
@@ -1733,6 +1828,33 @@ document.addEventListener('DOMContentLoaded', function() {
 @app.route('/')
 def home():
     return render_template_string(DASHBOARD_HTML)
+
+# ============================================================
+# SOURCES ROUTE - Using Source Manager
+# ============================================================
+
+@app.route('/api/sources', methods=['GET'])
+def get_sources():
+    """Get configured source accounts using SourceManager"""
+    try:
+        if SOURCE_MANAGER_AVAILABLE:
+            manager = SourceManager()
+            sources = manager.get_sources()
+            summary = manager.get_sources_summary()
+        else:
+            from config import SOURCE_ACCOUNTS
+            sources = SOURCE_ACCOUNTS
+            summary = {'total': len(sources), 'categories': {}, 'source_names': []}
+        
+        return jsonify({
+            'success': True,
+            'count': len(sources),
+            'sources': sources,
+            'summary': summary
+        })
+    except Exception as e:
+        logger.error(f"Error getting sources: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 400
 
 # ============================================================
 # POST FETCHING ROUTES
