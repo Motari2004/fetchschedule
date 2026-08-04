@@ -55,6 +55,20 @@ SOURCE_ACCOUNTS = [
         "url": "https://www.facebook.com/lovequotesmedia",
         "category": "Inspiration",
         "priority": 3
+    },
+    {
+        "id": "motivation_daily_new",
+        "name": "Motivation Daily",
+        "url": "https://www.facebook.com/profile.php?id=61581545263045",
+        "category": "Motivation",
+        "priority": 4
+    },
+    {
+        "id": "daily_motivation",
+        "name": "Daily Motivation",
+        "url": "https://www.facebook.com/profile.php?id=61575882236778",
+        "category": "Motivation",
+        "priority": 5
     }
 ]
 
